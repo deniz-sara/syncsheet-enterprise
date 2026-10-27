@@ -366,10 +366,14 @@ export default function UniverSpreadsheet({
     };
   };
 
-  // Yardımcı: Univer içine yeni bir workbook nesnesini güvenli şekilde yükle
+  // Yardımcı: Univer içine yeni bir workbook nesnesini güvenli şekilde yükle (Çift yüklemeyi ve donmayı önler)
+  const lastMountedRef = useRef<any>(null);
   const mountWorkbookIntoUniver = (wbToLoad: UniverWorkbookData) => {
     const api = univerAPIRef.current;
-    if (!api) return;
+    if (!api || !wbToLoad) return;
+    if (lastMountedRef.current === wbToLoad) return;
+    lastMountedRef.current = wbToLoad;
+
     try {
       isApplyingRemoteRef.current = true;
       const cleanClone: UniverWorkbookData = JSON.parse(JSON.stringify(wbToLoad));
@@ -380,26 +384,24 @@ export default function UniverSpreadsheet({
       const newUnitId = `wb_unit_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       currentUnitIdRef.current = newUnitId;
 
+      if (oldUnitId && oldUnitId !== newUnitId && typeof api.disposeUnit === 'function') {
+        try {
+          api.disposeUnit(oldUnitId);
+        } catch (e) {
+          // ignore
+        }
+      }
+
       api.createWorkbook({
         ...cleanClone,
         id: newUnitId,
       });
-
-      if (oldUnitId && oldUnitId !== newUnitId && typeof api.disposeUnit === 'function') {
-        setTimeout(() => {
-          try {
-            api.disposeUnit(oldUnitId);
-          } catch (e) {
-            // ignore
-          }
-        }, 60);
-      }
     } catch (err) {
       console.error('Workbook mount error:', err);
     } finally {
       setTimeout(() => {
         isApplyingRemoteRef.current = false;
-      }, 100);
+      }, 80);
     }
   };
 
@@ -598,23 +600,6 @@ export default function UniverSpreadsheet({
 
       const handle: UniverSpreadsheetHandle = {
         getCurrentSnapshot: () => {
-          try {
-            const activeWb = univerAPIRef.current?.getActiveWorkbook();
-            let savedSnap: any = null;
-            if (activeWb && typeof activeWb.save === 'function') {
-              savedSnap = activeWb.save();
-            } else if (activeWb && typeof activeWb.getSnapshot === 'function') {
-              savedSnap = activeWb.getSnapshot();
-            }
-            if (savedSnap && savedSnap.sheets) {
-              const cloned = JSON.parse(JSON.stringify(savedSnap));
-              cloned.name = currentWorkbookDataRef.current.name || cloned.name;
-              currentWorkbookDataRef.current = cloned;
-              return cloned;
-            }
-          } catch (e) {
-            // ignore
-          }
           return JSON.parse(JSON.stringify(currentWorkbookDataRef.current));
         },
         loadWorkbookSnapshot: (wb: UniverWorkbookData) => {

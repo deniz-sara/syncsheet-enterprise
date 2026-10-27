@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import {
   FileSpreadsheet,
@@ -413,18 +413,28 @@ for (let r = 1; r <= 5; r++) {
   const persistWorkspaceToBrowser = (
     overrideWb?: UniverWorkbookData,
     overrideTabs?: OpenWorkbookTab[],
-    overrideActiveTabId?: string
+    overrideActiveTabId?: string,
+    overrideRoomCode?: string
   ) => {
     if (typeof window === 'undefined' || !isHydratedFromStorageRef.current) return;
     try {
       const wbToSave = overrideWb || sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+      // Eğer tablo çok büyükse (>2.5MB) tarayıcı localStorage'ını dondurmamak için yalnız sunucuya (Supabase) bırak
+      const serializedWb = JSON.stringify(wbToSave);
+      if (serializedWb.length > 2500000) return;
+
       const tabIdToSave = overrideActiveTabId || activeWorkbookTabId;
-      const tabsToSave = (overrideTabs || openWorkbooks).map((t) =>
-        t.id === tabIdToSave ? { ...t, name: wbToSave.name, workbookData: wbToSave } : t
-      );
+      const codeToSave = overrideRoomCode || roomCode;
+      const tabsToSave = (overrideTabs || openWorkbooks)
+        .slice(0, 8)
+        .map((t) =>
+          t.id === tabIdToSave
+            ? { ...t, roomCode: codeToSave, name: wbToSave.name, workbookData: wbToSave }
+            : t
+        );
       const payload = {
         savedAt: Date.now(),
-        roomCode,
+        roomCode: codeToSave,
         activeWorkbookTabId: tabIdToSave,
         workbookData: wbToSave,
         openWorkbooks: tabsToSave,
@@ -433,7 +443,7 @@ for (let r = 1; r <= 5; r++) {
       };
       localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(payload));
     } catch (e) {
-      // 100K satır gibi çok büyük tablolarda localStorage kotası aşılırsa sunucu (.data/rooms.json) devrededir
+      // 100K satır gibi çok büyük tablolarda localStorage kotası aşılırsa sunucu (Supabase) devrededir
     }
   };
 
@@ -442,11 +452,12 @@ for (let r = 1; r <= 5; r++) {
   }, [roomVersion]);
 
   useEffect(() => {
+    if (Object.keys(collaborators).length === 0) return;
     const timer = setInterval(() => {
       setNowTick(Date.now());
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [collaborators]);
 
   const showToast = (msg: string) => {
     setStatusToast(msg);
@@ -596,8 +607,20 @@ for (let r = 1; r <= 5; r++) {
       setIsAuthenticated(true);
       setAuthLoading(false);
 
-      // Kullanıcının en son çalıştığı Excel odasını otomatik yükle
-      if (userRooms.length > 0) {
+      // Eğer URL'de paylaşılan bir oda kodu (?room=XLS-...) varsa doğrudan o odayı aç, yoksa son odayı yükle
+      const urlParams =
+        typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+      const sharedRoomParam = urlParams?.get('room')?.trim().toUpperCase();
+      const sharedPinParam = urlParams?.get('pin')?.trim() || '';
+
+      if (sharedRoomParam) {
+        const savedPin =
+          sharedPinParam ||
+          userRooms.find((r) => r.roomCode === sharedRoomParam)?.pin ||
+          '';
+        setRoomPin(savedPin);
+        await loadRoomFromDatabase(sharedRoomParam, savedPin, false, 0);
+      } else if (userRooms.length > 0) {
         const lastRoom = userRooms[0];
         setRoomPin(lastRoom.pin || '');
         await loadRoomFromDatabase(lastRoom.roomCode, lastRoom.pin || '', true, 0);
@@ -670,6 +693,7 @@ for (let r = 1; r <= 5; r++) {
 
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
+    const pinParam = params.get('pin');
     const roleParam = params.get('role');
     if (roleParam === 'viewer') {
       setCurrentUser((prev) => ({ ...prev, role: 'viewer' }));
@@ -681,7 +705,9 @@ for (let r = 1; r <= 5; r++) {
       ? roomParam.toUpperCase()
       : restoredUserRooms[0]?.roomCode || 'XLS-849-201';
     let targetPin =
-      restoredUserRooms.find((r) => r.roomCode === targetRoom)?.pin || '';
+      pinParam ||
+      restoredUserRooms.find((r) => r.roomCode === targetRoom)?.pin ||
+      '';
 
     // 1) Önce tarayıcı hafızasındaki (localStorage) son kaydedilen çalışma kitaplarını ve tabloyu geri yükle
     if (!roomParam) {
@@ -730,8 +756,8 @@ for (let r = 1; r <= 5; r++) {
   // Tablo, sekmeler veya versiyonlar değiştikçe tarayıcı hafızasını otomatik güncelle
   useEffect(() => {
     if (!isHydratedFromStorageRef.current) return;
-    persistWorkspaceToBrowser(workbookData, openWorkbooks, activeWorkbookTabId);
-  }, [workbookData, openWorkbooks, activeWorkbookTabId, snapshots, auditLog]);
+    persistWorkspaceToBrowser(workbookData, openWorkbooks, activeWorkbookTabId, roomCode);
+  }, [roomCode, workbookData, openWorkbooks, activeWorkbookTabId, snapshots, auditLog]);
 
   // Seçilen fonksiyon değiştiğinde varsayılan örnek argümanları akıllıca doldur
   const handleSelectFormulaInWizard = (fnName: string) => {
@@ -1063,126 +1089,169 @@ for (let r = 1; r <= 5; r++) {
 
     try {
       const buffer = await file.arrayBuffer();
-      setTimeout(() => {
-        const result = parseExcelBufferToUniverData(buffer, file.name, (percent, statusText) => {
-          setImportProgress({ active: true, percent, text: statusText });
-        });
+      setTimeout(async () => {
+        try {
+          const result = parseExcelBufferToUniverData(buffer, file.name, (percent, statusText) => {
+            setImportProgress({ active: true, percent, text: statusText });
+          });
 
-        // Yüklenen Excel dosyası için kullanıcıya özel yeni bir oda kodu oluştur ve geçmişine kaydet
-        const r1 = Math.floor(100 + Math.random() * 900);
-        const r2 = Math.floor(100 + Math.random() * 900);
-        const importedRoomCode = `XLS-${r1}-${r2}`;
+          // Yüklenen Excel dosyası için kullanıcıya özel yeni bir oda kodu oluştur ve geçmişine kaydet
+          const r1 = Math.floor(100 + Math.random() * 900);
+          const r2 = Math.floor(100 + Math.random() * 900);
+          const importedRoomCode = `XLS-${r1}-${r2}`;
+          result.workbookData.id = `wb_${importedRoomCode}`;
 
-        // Mevcut açık kitabı kaydet ve yeni yüklenen Excel'i YENİ SEKME olarak çalışma kitaplarına ekle!
-        const currentLiveSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
-        const newTab: OpenWorkbookTab = {
-          id: result.workbookData.id,
-          roomCode: importedRoomCode,
-          name: result.workbookData.name,
-          workbookData: result.workbookData,
-          updatedAt: Date.now(),
-        };
+          const firstSheetId =
+            result.workbookData.sheetOrder?.[0] ||
+            Object.keys(result.workbookData.sheets || {})[0] ||
+            'sheet_1';
+          const firstSheetName =
+            result.workbookData.sheets?.[firstSheetId]?.name || 'Sayfa 1';
 
-        setOpenWorkbooks((prev) => [
-          ...prev.map((t) =>
-            t.id === activeWorkbookTabId
-              ? {
-                  ...t,
-                  roomCode: t.roomCode || roomCode,
-                  workbookData: JSON.parse(JSON.stringify(currentLiveSnap)),
-                }
-              : t
-          ),
-          newTab,
-        ]);
-        setActiveWorkbookTabId(newTab.id);
-
-        setWorkbookData(result.workbookData);
-        sheetHandleRef.current?.loadWorkbookSnapshot(result.workbookData);
-
-        const nowTs = Date.now();
-        setStats({
-          totalRows: result.totalRows,
-          totalCells: result.totalCells,
-          sheetCount: result.sheetCount,
-          compressedKB: Math.max(4, Math.round(result.totalCells * 0.012)),
-          lastSavedTime: new Date(nowTs).toLocaleTimeString('tr-TR', {
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
-          lastSyncText: 'Otomatik Kaydedildi',
-          zeroUploadVerified: true,
-        });
-
-        setRoomCode(importedRoomCode);
-        setRoomPin('');
-
-        const snapId = `snap_${nowTs}`;
-        const newSnapMeta: SnapshotMeta = {
-          id: snapId,
-          roomCode: importedRoomCode,
-          label: `Excel Yüklendi: ${file.name}`,
-          createdBy: currentUser.name,
-          createdByDepartment: currentUser.department,
-          createdAt: new Date(nowTs).toISOString(),
-          timestamp: nowTs,
-          rowCount: result.totalRows,
-        };
-
-        setSnapshots((prev) =>
-          [newSnapMeta, ...prev].sort((a, b) => b.timestamp - a.timestamp)
-        );
-        setLocalSnapshotsMap((prev) => ({
-          ...prev,
-          [snapId]: JSON.parse(JSON.stringify(result.workbookData)),
-        }));
-
-        setAuditLog((prev) =>
-          [
-            {
-              id: `aud_${nowTs}`,
-              roomCode: importedRoomCode,
-              userId: currentUser.id,
-              userName: currentUser.name,
-              userDepartment: currentUser.department,
-              userColor: currentUser.color,
-              action: `"${file.name}" dosyasını yeni çalışma kitabı olarak açtı`,
-              timestamp: nowTs,
-              snapshotId: snapId,
-            },
-            ...prev,
-          ].sort((a, b) => b.timestamp - a.timestamp)
-        );
-
-        fetch('/api/rooms', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            actionType: 'SAVE_WORKBOOK',
+          // Mevcut açık kitabı kaydet ve yeni yüklenen Excel'i YENİ SEKME olarak çalışma kitaplarına ekle!
+          const currentLiveSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+          const newTab: OpenWorkbookTab = {
+            id: result.workbookData.id,
             roomCode: importedRoomCode,
-            title: result.workbookData.name,
-            ownerId: currentUser.id,
-            ownerName: currentUser.name,
-            ownerEmail: currentUser.email,
+            name: result.workbookData.name,
             workbookData: result.workbookData,
-          }),
-        }).catch(() => {});
+            updatedAt: Date.now(),
+          };
 
-        recordRoomInUserHistory(
-          importedRoomCode,
-          result.workbookData.name,
-          '',
-          'owner'
-        );
+          setOpenWorkbooks((prev) => [
+            ...prev.map((t) =>
+              t.id === activeWorkbookTabId
+                ? {
+                    ...t,
+                    roomCode: t.roomCode || roomCode,
+                    workbookData: currentLiveSnap,
+                  }
+                : t
+            ),
+            newTab,
+          ]);
+          setActiveWorkbookTabId(newTab.id);
 
-        setTimeout(() => {
+          setActiveSelection({
+            sheetId: firstSheetId,
+            sheetName: firstSheetName,
+            cellRef: 'A1',
+            row: 0,
+            col: 0,
+            value: '',
+            formula: undefined,
+          });
+          setPivotConfig((prev) => ({
+            ...prev,
+            sourceSheetId: firstSheetId,
+            rowColIdx: 0,
+            valColIdx: 1,
+          }));
+
+          latestRestoredWorkbookRef.current = result.workbookData;
+          setWorkbookData(result.workbookData);
+          sheetHandleRef.current?.loadWorkbookSnapshot(result.workbookData);
+
+          const nowTs = Date.now();
+          const compKB = Math.max(4, Math.round(result.totalCells * 0.012));
+          setStats({
+            totalRows: result.totalRows,
+            totalCells: result.totalCells,
+            sheetCount: result.sheetCount,
+            compressedKB: compKB,
+            lastSavedTime: new Date(nowTs).toLocaleTimeString('tr-TR', {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+            lastSyncText: 'Otomatik Kaydedildi',
+            zeroUploadVerified: true,
+          });
+
+          setRoomCode(importedRoomCode);
+          setRoomPin('');
+          setIsRoomOwner(true);
+
+          const snapId = `snap_${nowTs}`;
+          const newSnapMeta: SnapshotMeta = {
+            id: snapId,
+            roomCode: importedRoomCode,
+            label: `Excel Yüklendi: ${file.name}`,
+            createdBy: currentUser.name,
+            createdByDepartment: currentUser.department,
+            createdAt: new Date(nowTs).toISOString(),
+            timestamp: nowTs,
+            rowCount: result.totalRows,
+          };
+
+          setSnapshots((prev) =>
+            [newSnapMeta, ...prev].sort((a, b) => b.timestamp - a.timestamp)
+          );
+          setLocalSnapshotsMap((prev) => ({
+            ...prev,
+            [snapId]: result.workbookData,
+          }));
+
+          setAuditLog((prev) =>
+            [
+              {
+                id: `aud_${nowTs}`,
+                roomCode: importedRoomCode,
+                userId: currentUser.id,
+                userName: currentUser.name,
+                userDepartment: currentUser.department,
+                userColor: currentUser.color,
+                action: `"${file.name}" dosyasını yeni çalışma kitabı olarak açtı`,
+                timestamp: nowTs,
+                snapshotId: snapId,
+              },
+              ...prev,
+            ].sort((a, b) => b.timestamp - a.timestamp)
+          );
+
+          setImportProgress({
+            active: true,
+            percent: 95,
+            text: `Oda (${importedRoomCode}) veritabanına kaydediliyor...`,
+          });
+
+          await fetch('/api/rooms', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              actionType: 'SAVE_WORKBOOK',
+              roomCode: importedRoomCode,
+              defaultRole: 'editor',
+              protectedColumns: [],
+              title: result.workbookData.name,
+              ownerId: currentUser.id,
+              ownerName: currentUser.name,
+              ownerEmail: currentUser.email,
+              workbookData: result.workbookData,
+              stats: {
+                totalRows: result.totalRows,
+                totalCells: result.totalCells,
+                compressedKB: compKB,
+              },
+            }),
+          }).catch(() => {});
+
+          await recordRoomInUserHistory(
+            importedRoomCode,
+            result.workbookData.name,
+            '',
+            'owner'
+          );
+
           setImportProgress({ active: false, percent: 0, text: '' });
           setActiveModal(null);
           showToast(
-            `✅ "${file.name}" (${importedRoomCode}) odası olarak kaydedildi ve Excellerim listenize eklendi!`
+            `✅ "${file.name}" (${importedRoomCode}) odası olarak kaydedildi ve paylaşıma hazır!`
           );
-        }, 250);
-      }, 60);
+        } catch (innerErr: any) {
+          setImportProgress({ active: false, percent: 0, text: '' });
+          showToast(`Hata: ${innerErr?.message || 'Excel işlenemedi'}`);
+        }
+      }, 40);
     } catch (err: any) {
       setImportProgress({ active: false, percent: 0, text: '' });
       showToast(`Hata: ${err?.message || 'Excel okunamadı'}`);
@@ -1207,32 +1276,84 @@ for (let r = 1; r <= 5; r++) {
     }
   };
 
-  const handleClipboardImport = () => {
+  const handleClipboardImport = async () => {
     if (!clipboardText.trim()) return;
-    const res = parseClipboardTextToUniverData(clipboardText, 'Panodan_Aktarilan_Tablo');
+    const r1 = Math.floor(100 + Math.random() * 900);
+    const r2 = Math.floor(100 + Math.random() * 900);
+    const clippedRoomCode = `XLS-${r1}-${r2}`;
+    const tableTitle = `Panodan_Tablo_${r1}`;
+
+    const res = parseClipboardTextToUniverData(clipboardText, tableTitle);
+    res.workbookData.id = `wb_${clippedRoomCode}`;
+
     const nowTs = Date.now();
     const snapId = `snap_clip_${nowTs}`;
+    const compKB = Math.max(2, Math.round(res.totalCells * 0.012));
 
+    const currentLiveSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
     const newTab: OpenWorkbookTab = {
       id: res.workbookData.id,
+      roomCode: clippedRoomCode,
       name: res.workbookData.name,
       workbookData: res.workbookData,
       updatedAt: nowTs,
     };
-    setOpenWorkbooks((prev) => [...prev, newTab]);
+    setOpenWorkbooks((prev) => [
+      ...prev.map((t) =>
+        t.id === activeWorkbookTabId
+          ? { ...t, roomCode: t.roomCode || roomCode, workbookData: currentLiveSnap }
+          : t
+      ),
+      newTab,
+    ]);
     setActiveWorkbookTabId(newTab.id);
 
+    setActiveSelection({
+      sheetId: 'sheet_1',
+      sheetName: 'Sayfa 1',
+      cellRef: 'A1',
+      row: 0,
+      col: 0,
+      value: '',
+      formula: undefined,
+    });
+    setPivotConfig((prev) => ({
+      ...prev,
+      sourceSheetId: 'sheet_1',
+      rowColIdx: 0,
+      valColIdx: 1,
+    }));
+
+    setRoomCode(clippedRoomCode);
+    setRoomPin('');
+    setIsRoomOwner(true);
+
+    latestRestoredWorkbookRef.current = res.workbookData;
     setWorkbookData(res.workbookData);
     sheetHandleRef.current?.loadWorkbookSnapshot(res.workbookData);
+
+    setStats({
+      totalRows: res.totalRows,
+      totalCells: res.totalCells,
+      sheetCount: 1,
+      compressedKB: compKB,
+      lastSavedTime: new Date(nowTs).toLocaleTimeString('tr-TR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      lastSyncText: 'Otomatik Kaydedildi',
+      zeroUploadVerified: true,
+    });
+
     setLocalSnapshotsMap((prev) => ({
       ...prev,
-      [snapId]: JSON.parse(JSON.stringify(res.workbookData)),
+      [snapId]: res.workbookData,
     }));
     setSnapshots((prev) =>
       [
         {
           id: snapId,
-          roomCode,
+          roomCode: clippedRoomCode,
           label: 'Panodan Aktarılan Tablo',
           createdBy: currentUser.name,
           createdByDepartment: currentUser.department,
@@ -1243,11 +1364,57 @@ for (let r = 1; r <= 5; r++) {
         ...prev,
       ].sort((a, b) => b.timestamp - a.timestamp)
     );
+    setAuditLog((prev) =>
+      [
+        {
+          id: `aud_clip_${nowTs}`,
+          roomCode: clippedRoomCode,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userDepartment: currentUser.department,
+          userColor: currentUser.color,
+          action: `Panodan ${res.totalRows} satırlık yeni çalışma kitabı (${clippedRoomCode}) oluşturdu`,
+          timestamp: nowTs,
+          snapshotId: snapId,
+        },
+        ...prev,
+      ].sort((a, b) => b.timestamp - a.timestamp)
+    );
 
-    roomClientRef.current?.sendWorkbookSync(currentUser.id, currentUser.name, res.workbookData);
     setClipboardText('');
     setActiveModal(null);
-    showToast(`✅ ${res.totalRows} satır panodan yeni çalışma kitabına aktarıldı!`);
+
+    await fetch('/api/rooms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        actionType: 'SAVE_WORKBOOK',
+        roomCode: clippedRoomCode,
+        defaultRole: 'editor',
+        protectedColumns: [],
+        title: res.workbookData.name,
+        ownerId: currentUser.id,
+        ownerName: currentUser.name,
+        ownerEmail: currentUser.email,
+        workbookData: res.workbookData,
+        stats: {
+          totalRows: res.totalRows,
+          totalCells: res.totalCells,
+          compressedKB: compKB,
+        },
+      }),
+    }).catch(() => {});
+
+    await recordRoomInUserHistory(
+      clippedRoomCode,
+      res.workbookData.name,
+      '',
+      'owner'
+    );
+
+    showToast(
+      `✅ ${res.totalRows} satır panodan "${tableTitle}" (${clippedRoomCode}) odasına aktarıldı ve kaydedildi!`
+    );
   };
 
   const handleLoadLargeDataset = (rowCount: number) => {
@@ -1998,6 +2165,12 @@ for (let r = 1; r <= 5; r++) {
       );
       const data = await res.json();
       if (!res.ok) {
+        if (data?.requiresPin) {
+          setJoinCodeInput(clean);
+          setActiveModal('join');
+          showToast('🔒 Bu oda PIN şifresi ile korunuyor. Lütfen PIN şifresini girin.');
+          return;
+        }
         if (!silentIfNotFound) {
           showToast(`⚠️ ${data.error || 'Oda bulunamadı'}`);
         }
@@ -2304,17 +2477,31 @@ for (let r = 1; r <= 5; r++) {
     }
   };
 
-  // Canlı Pivot Hesaplaması
-  const livePivotResult = computePivotTable(workbookData, pivotConfig);
-  const currentSheetColumns = getSheetColumnRanges(workbookData, activeSelection.sheetId);
+  // Canlı Pivot ve Sütun Hesaplamalarını Memoize Et (Büyük Excel dosyalarında her saniye yeniden hesaplanıp ekranı dondurmasını önler)
+  const livePivotResult = useMemo(
+    () => computePivotTable(workbookData, pivotConfig),
+    [workbookData, pivotConfig]
+  );
+
+  const currentSheetColumns = useMemo(
+    () => getSheetColumnRanges(workbookData, activeSelection.sheetId),
+    [workbookData, activeSelection.sheetId]
+  );
+
   const selectedFormulaDef =
     EXCEL_FORMULA_CATALOG.find((f) => f.name === selectedFormulaName) || EXCEL_FORMULA_CATALOG[0];
-  const liveFormulaPreview = evaluateFormulaPreview(
-    selectedFormulaName,
-    fxArgValues,
-    workbookData,
-    activeSelection.sheetId
-  );
+
+  const liveFormulaPreview = useMemo(() => {
+    if (activeModal !== 'fx') {
+      return { formulaString: `=${selectedFormulaName}()`, computedValue: '', explanation: '' };
+    }
+    return evaluateFormulaPreview(
+      selectedFormulaName,
+      fxArgValues,
+      workbookData,
+      activeSelection.sheetId
+    );
+  }, [selectedFormulaName, fxArgValues, workbookData, activeSelection.sheetId, activeModal]);
 
   // Versiyon ve İşlem listesini SADECE AKTİF BULUNULAN ODADAKİ EXCEL İÇİN filtrele ve en yeni en üstte sırala
   const sortedSnapshots = snapshots
@@ -4476,19 +4663,20 @@ for (let r = 1; r <= 5; r++) {
                     readOnly
                     value={
                       typeof window !== 'undefined'
-                        ? `${window.location.origin}/?room=${roomCode}&role=${defaultRoomRole}`
-                        : `http://localhost:3005/?room=${roomCode}&role=${defaultRoomRole}`
+                        ? `${window.location.origin}/?room=${roomCode}&role=${defaultRoomRole}${roomPin ? `&pin=${encodeURIComponent(roomPin)}` : ''}`
+                        : `http://localhost:3005/?room=${roomCode}&role=${defaultRoomRole}${roomPin ? `&pin=${encodeURIComponent(roomPin)}` : ''}`
                     }
                     className="flex-1 bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs font-mono text-slate-600"
                   />
                   <button
                     onClick={() => {
-                      const url = `${window.location.origin}/?room=${roomCode}&role=${defaultRoomRole}`;
+                      const url = `${window.location.origin}/?room=${roomCode}&role=${defaultRoomRole}${roomPin ? `&pin=${encodeURIComponent(roomPin)}` : ''}`;
                       navigator.clipboard.writeText(url);
                       setCopiedLink(true);
+                      saveRoomToDatabase();
                       setTimeout(() => setCopiedLink(false), 2000);
                     }}
-                    className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1"
+                    className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
                   >
                     {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                     <span>{copiedLink ? 'Kopyalandı' : 'Kopyala'}</span>

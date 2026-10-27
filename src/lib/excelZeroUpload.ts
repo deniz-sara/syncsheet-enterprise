@@ -49,14 +49,10 @@ export function parseExcelBufferToUniverData(
     sheetOrder.push(sheetId);
 
     const cellData: Record<number, Record<number, any>> = {};
-    const ref = ws['!ref'] || 'A1:Z100';
-    const range = XLSX.utils.decode_range(ref);
+    let actualMaxRow = 0;
+    let actualMaxCol = 0;
 
-    const maxRow = Math.max(range.e.r + 1, 1000);
-    const maxCol = Math.max(range.e.c + 1, 26);
-    totalRows += range.e.r - range.s.r + 1;
-
-    // Hücreleri hızlıca tarayalım
+    // Hücreleri hızlıca tarayalım (Boş biçimlendirilmiş hücreleri atlayarak JSON şişmesini önleyelim)
     const keys = Object.keys(ws);
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i];
@@ -65,9 +61,20 @@ export function parseExcelBufferToUniverData(
       const cell = ws[key];
       if (!cell) continue;
 
+      const hasFormula = Boolean(cell.f && String(cell.f).trim() !== '');
+      const hasValue =
+        cell.v !== undefined && cell.v !== null && String(cell.v).trim() !== '';
+      if (!hasValue && !hasFormula) continue;
+
       const decoded = XLSX.utils.decode_cell(key);
       const r = decoded.r;
       const c = decoded.c;
+
+      // Güvenlik sınırı: tek sayfada 50.000 satır / 200 sütun üstü boş/hatalı referansları engelle
+      if (r > 50000 || c > 200) continue;
+
+      if (r > actualMaxRow) actualMaxRow = r;
+      if (c > actualMaxCol) actualMaxCol = c;
 
       if (!cellData[r]) {
         cellData[r] = {};
@@ -76,7 +83,7 @@ export function parseExcelBufferToUniverData(
       const univerCell: any = {};
 
       // Değer tipi: 1 = String, 2 = Number, 3 = Boolean
-      if (cell.t === 'n') {
+      if (cell.t === 'n' && typeof cell.v === 'number' && !isNaN(cell.v)) {
         univerCell.v = cell.v;
         univerCell.t = 2;
       } else if (cell.t === 'b') {
@@ -85,14 +92,15 @@ export function parseExcelBufferToUniverData(
       } else if (cell.t === 'd' && cell.v instanceof Date) {
         univerCell.v = cell.w || cell.v.toISOString().split('T')[0];
         univerCell.t = 1;
-      } else if (cell.v !== undefined && cell.v !== null) {
+      } else if (hasValue) {
         univerCell.v = String(cell.v);
         univerCell.t = 1;
       }
 
       // Formül varsa ekle
-      if (cell.f) {
-        univerCell.f = cell.f.startsWith('=') ? cell.f : `=${cell.f}`;
+      if (hasFormula) {
+        const fStr = String(cell.f).trim();
+        univerCell.f = fStr.startsWith('=') ? fStr : `=${fStr}`;
       }
 
       // İlk satır (Header) ise varsayılan şık stil verelim
@@ -104,18 +112,22 @@ export function parseExcelBufferToUniverData(
       totalCells++;
     }
 
+    totalRows += actualMaxRow + 1;
+
     // Birleştirilmiş hücreler (Merges)
-    const mergeData = (ws['!merges'] || []).map((m: any) => ({
-      startRow: m.s.r,
-      endRow: m.e.r,
-      startColumn: m.s.c,
-      endColumn: m.e.c,
-    }));
+    const mergeData = (ws['!merges'] || [])
+      .filter((m: any) => m && m.e && m.e.r <= actualMaxRow + 50 && m.e.c <= actualMaxCol + 20)
+      .map((m: any) => ({
+        startRow: m.s.r,
+        endRow: m.e.r,
+        startColumn: m.s.c,
+        endColumn: m.e.c,
+      }));
 
     // Sütun genişlikleri
     const columnData: Record<number, { w: number }> = {};
     if (ws['!cols']) {
-      ws['!cols'].forEach((col: any, colIdx: number) => {
+      ws['!cols'].slice(0, actualMaxCol + 20).forEach((col: any, colIdx: number) => {
         if (col && (col.wpx || col.wch)) {
           columnData[colIdx] = { w: col.wpx || Math.round((col.wch || 12) * 8) };
         }
@@ -127,8 +139,8 @@ export function parseExcelBufferToUniverData(
       name: sheetName,
       tabColor: idx === 0 ? '#10b981' : '',
       hidden: 0,
-      rowCount: Math.max(maxRow + 200, 2000),
-      columnCount: Math.max(maxCol + 10, 30),
+      rowCount: Math.max(actualMaxRow + 100, 500),
+      columnCount: Math.max(actualMaxCol + 10, 26),
       zoomRatio: 1,
       freeze: {
         xSplit: 0,
@@ -192,28 +204,32 @@ export function parseExcelBufferToUniverData(
 }
 
 /**
- * Masaüstü Excel'den Ctrl+C ile kopyalanan TSV / metin verisini
+ * Masaüstü Excel'den Ctrl+C ile kopyalanan TSV / CSV / metin verisini
  * doğrudan Univer Workbook formatına dönüştürür (Smart Clipboard Sync).
  */
 export function parseClipboardTextToUniverData(
   clipboardText: string,
-  title = 'Panodan Aktarılan Tablo'
+  title = 'Panodan_Aktarilan_Tablo'
 ): {
   workbookData: UniverWorkbookData;
   totalRows: number;
   totalCells: number;
 } {
-  const lines = clipboardText.replace(/\r\n/g, '\n').split('\n');
-  if (lines.length > 0 && lines[lines.length - 1].trim() === '') {
-    lines.pop();
-  }
+  const rawLines = clipboardText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const lines = rawLines.filter((l, idx) => idx === 0 || l.trim() !== '');
 
   const cellData: Record<number, Record<number, any>> = {};
   let maxCols = 0;
   let totalCells = 0;
 
   lines.forEach((line, r) => {
-    const cols = line.split('\t');
+    const cols = line.includes('\t')
+      ? line.split('\t')
+      : line.includes(';')
+        ? line.split(';')
+        : line.includes(',')
+          ? line.split(',')
+          : [line];
     if (cols.length > maxCols) maxCols = cols.length;
     cellData[r] = {};
 
@@ -224,9 +240,12 @@ export function parseClipboardTextToUniverData(
       const cell: any = {};
       if (val.startsWith('=')) {
         cell.f = val;
+        cell.v = val;
+        cell.t = 1;
       } else {
-        const num = Number(val.replace(/\./g, '').replace(',', '.'));
-        if (!isNaN(num) && /^[\d.,-]+$/.test(val)) {
+        const cleanNumStr = val.replace(/\./g, '').replace(',', '.');
+        const num = Number(cleanNumStr);
+        if (!isNaN(num) && /^[-+]?[\d.,]+$/.test(val)) {
           cell.v = num;
           cell.t = 2;
         } else {
@@ -257,21 +276,34 @@ export function parseClipboardTextToUniverData(
         cl: { rgb: '#0369a1' },
         fs: 11,
       },
+      currency_style: {
+        n: { pattern: '#,##0.00 "₺"' },
+      },
     },
     sheetOrder: [sheetId],
     sheets: {
       [sheetId]: {
         id: sheetId,
         name: 'Sayfa 1',
-        rowCount: Math.max(lines.length + 500, 2000),
+        tabColor: '#10b981',
+        hidden: 0,
+        rowCount: Math.max(lines.length + 100, 500),
         columnCount: Math.max(maxCols + 10, 26),
+        zoomRatio: 1,
         defaultColumnWidth: 120,
         defaultRowHeight: 24,
+        scrollTop: 0,
+        scrollLeft: 0,
         freeze: {
           xSplit: 0,
           ySplit: 1,
           startRow: 1,
           startColumn: 0,
+        },
+        mergeData: [],
+        columnData: {},
+        rowData: {
+          0: { h: 30 },
         },
         cellData,
       },
@@ -280,7 +312,7 @@ export function parseClipboardTextToUniverData(
 
   return {
     workbookData,
-    totalRows: lines.length,
+    totalRows: Math.max(lines.length, 1),
     totalCells,
   };
 }
