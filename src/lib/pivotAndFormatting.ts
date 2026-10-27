@@ -42,6 +42,31 @@ export interface PivotComputationResult {
   filterOptions: string[];
 }
 
+export function isPivotSheetEntry(sheetId?: string, sheetObj?: any): boolean {
+  if (!sheetId && !sheetObj) return false;
+  const sid = String(sheetId || sheetObj?.id || '');
+  const sname = String(sheetObj?.name || '');
+  return (
+    sid.startsWith('sheet_pivot_') ||
+    sname.startsWith('Pivot_Tablo') ||
+    Boolean(sheetObj?.pivotConfig) ||
+    Boolean(sheetObj?.cellData?.[0]?.[0]?.custom?.pivotConfig)
+  );
+}
+
+export function getSavedPivotConfigFromSheet(
+  workbookData: UniverWorkbookData,
+  pivotSheetId: string
+): PivotConfig | null {
+  const sheet = workbookData?.sheets?.[pivotSheetId];
+  if (!sheet) return null;
+  const cfg = sheet.pivotConfig || sheet.cellData?.[0]?.[0]?.custom?.pivotConfig;
+  if (cfg && typeof cfg === 'object' && typeof cfg.rowColIdx === 'number') {
+    return { ...cfg };
+  }
+  return null;
+}
+
 export function resolveSourceSheetId(
   workbookData: UniverWorkbookData,
   preferredSheetId?: string
@@ -54,13 +79,13 @@ export function resolveSourceSheetId(
   if (
     preferredSheetId &&
     workbookData.sheets?.[preferredSheetId] &&
-    !preferredSheetId.startsWith('sheet_pivot_')
+    !isPivotSheetEntry(preferredSheetId, workbookData.sheets[preferredSheetId])
   ) {
     return preferredSheetId;
   }
 
   const firstNonPivot = sheetIds.find(
-    (id) => workbookData.sheets?.[id] && !id.startsWith('sheet_pivot_')
+    (id) => workbookData.sheets?.[id] && !isPivotSheetEntry(id, workbookData.sheets[id])
   );
   return firstNonPivot || sheetIds[0] || 'sheet_1';
 }
@@ -312,7 +337,7 @@ export function insertPivotSheetIntoWorkbook(
 ): { updatedWorkbook: UniverWorkbookData; newSheetName: string; pivotSheetId: string } {
   const clone: UniverWorkbookData = JSON.parse(JSON.stringify(workbookData));
   const existingPivotSheets = Object.keys(clone.sheets || {}).filter((k) =>
-    k.startsWith('sheet_pivot_')
+    isPivotSheetEntry(k, clone.sheets[k])
   );
 
   const reuseId =
@@ -320,10 +345,21 @@ export function insertPivotSheetIntoWorkbook(
       ? existingPivotSheetId
       : null;
 
-  const newSheetId = reuseId || `sheet_pivot_${Date.now()}`;
+  const existingNames = new Set(
+    Object.values(clone.sheets || {}).map((s: any) => String(s?.name || '').trim())
+  );
+  let nextNum = existingPivotSheets.length + 1;
+  let candidateName = `Pivot_Tablo_${nextNum}`;
+  while (existingNames.has(candidateName)) {
+    nextNum++;
+    candidateName = `Pivot_Tablo_${nextNum}`;
+  }
+
+  const newSheetId =
+    reuseId || `sheet_pivot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const newSheetName = reuseId
     ? clone.sheets[reuseId].name || 'Pivot_Tablo_1'
-    : `Pivot_Tablo_${existingPivotSheets.length + 1}`;
+    : candidateName;
 
   const rowHeaderTitle =
     pivotResult.headers.find((h) => h.colIndex === config.rowColIdx)?.title ||
@@ -374,33 +410,41 @@ export function insertPivotSheetIntoWorkbook(
 
   const cellData: Record<number, Record<number, any>> = {};
 
-  // Üst bilgi satırı (Satır 0)
+  // Üst bilgi satırı (Satır 0) - custom.pivotConfig içinde bu Pivot sekmesinin kendi bağımsız ayarlarını saklar!
   cellData[0] = {
     0: {
-      v: `PİVOT RAPORU: ${rowHeaderTitle} bazında ${aggLabelMap[config.aggFunc]} (${valHeaderTitle})`,
+      v: `${newSheetName} (${pivotResult.sourceSheetName}): ${rowHeaderTitle} bazında ${aggLabelMap[config.aggFunc]} (${valHeaderTitle})`,
       t: 1,
       s: 'pivot_total',
+      custom: {
+        pivotConfig: { ...config, sourceSheetId: pivotResult.sourceSheetId },
+      },
     },
   };
 
   // Satır 1: Aktif Pivot Alanları özeti (Kullanıcı sağdaki menüden değiştirdikçe anında güncellenir)
   cellData[1] = {
     0: {
-      v: `Satır: ${rowHeaderTitle}`,
+      v: `Kaynak: ${pivotResult.sourceSheetName}`,
       t: 1,
       s: 'pivot_submeta',
     },
     1: {
-      v: `Sütun: ${colHeaderTitle}`,
+      v: `Satır: ${rowHeaderTitle}`,
       t: 1,
       s: 'pivot_submeta',
     },
     2: {
-      v: `Değer: ${aggLabelMap[config.aggFunc]} (${valHeaderTitle})`,
+      v: `Sütun: ${colHeaderTitle}`,
       t: 1,
       s: 'pivot_submeta',
     },
     3: {
+      v: `Değer: ${aggLabelMap[config.aggFunc]} (${valHeaderTitle})`,
+      t: 1,
+      s: 'pivot_submeta',
+    },
+    4: {
       v:
         config.filterColIdx !== null
           ? `Filtre: ${filterHeaderTitle} = ${config.filterValue === 'ALL' ? 'Tümü' : config.filterValue}`
@@ -497,6 +541,7 @@ export function insertPivotSheetIntoWorkbook(
     defaultColumnWidth: 175,
     defaultRowHeight: 26,
     cellData,
+    pivotConfig: { ...config, sourceSheetId: pivotResult.sourceSheetId },
   };
 
   // Oluşturulan veya güncellenen Pivot sekmesini ilk sıraya (aktif görünür sekmeye) koyalım

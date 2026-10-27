@@ -76,6 +76,8 @@ import {
   insertPivotSheetIntoWorkbook,
   extractSheetHeaders,
   resolveSourceSheetId,
+  isPivotSheetEntry,
+  getSavedPivotConfigFromSheet,
   ConditionalRuleOperator,
   ConditionalColorPreset,
   ConditionalRuleItem,
@@ -277,8 +279,11 @@ export default function SyncSheetApp() {
     match_mode: '0',
   });
 
-  // 5) PİVOT TABLO OLUŞTURUCU VE CANLI PIVOTTABLE ALANLARI STATE'İ
+  // 5) PİVOT TABLO OLUŞTURUCU VE ÇOKLU CANLI PIVOTTABLE ALANLARI STATE'İ
   const [activePivotSheetId, setActivePivotSheetId] = useState<string | null>(null);
+  const [pivotConfigsBySheetId, setPivotConfigsBySheetId] = useState<Record<string, PivotConfig>>(
+    {}
+  );
   const [pivotConfig, setPivotConfig] = useState<PivotConfig>({
     sourceSheetId: 'sheet_1',
     rowColIdx: 0,
@@ -1728,23 +1733,38 @@ for (let r = 1; r <= 5; r++) {
     );
   };
 
-  // PİVOT TABLOYU OLUŞTURMA VEYA CANLI OLARAK YERİNDE GÜNCELLEME (PIVOTTABLE FIELDS)
+  // PİVOT TABLOYU OLUŞTURMA (1., 2., 3. PİVOT) VEYA SEÇİLİ PİVOTU CANLI OLARAK YERİNDE GÜNCELLEME
   const applyLivePivotUpdate = (
     nextConfig: PivotConfig,
-    options?: { forceNewSheet?: boolean; silentToast?: boolean }
+    options?: { forceNewSheet?: boolean; silentToast?: boolean; targetPivotId?: string | null }
   ) => {
     const liveWb = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
     const resolvedSourceId = resolveSourceSheetId(liveWb, nextConfig.sourceSheetId);
+    const sourceHeaders = extractSheetHeaders(liveWb, resolvedSourceId);
+    const validRowIdx = sourceHeaders.some((h) => h.colIndex === nextConfig.rowColIdx)
+      ? nextConfig.rowColIdx
+      : sourceHeaders[0]?.colIndex ?? 0;
+    const validValIdx = sourceHeaders.some((h) => h.colIndex === nextConfig.valColIdx)
+      ? nextConfig.valColIdx
+      : sourceHeaders.find((h) => h.isNumeric && h.colIndex !== validRowIdx)?.colIndex ??
+        sourceHeaders[Math.min(1, sourceHeaders.length - 1)]?.colIndex ??
+        0;
+
     const normalizedConfig: PivotConfig = {
       ...nextConfig,
       sourceSheetId: resolvedSourceId,
+      rowColIdx: validRowIdx,
+      valColIdx: validValIdx,
     };
 
     const existingPivotIds = Object.keys(liveWb.sheets || {}).filter((k) =>
-      k.startsWith('sheet_pivot_')
+      isPivotSheetEntry(k, liveWb.sheets[k])
     );
+
     const targetPivotId = options?.forceNewSheet
       ? null
+      : options?.targetPivotId !== undefined
+      ? options.targetPivotId
       : activePivotSheetId && liveWb.sheets?.[activePivotSheetId]
       ? activePivotSheetId
       : existingPivotIds[0] || null;
@@ -1759,6 +1779,10 @@ for (let r = 1; r <= 5; r++) {
 
     setPivotConfig(normalizedConfig);
     setActivePivotSheetId(pivotSheetId);
+    setPivotConfigsBySheetId((prev) => ({
+      ...prev,
+      [pivotSheetId]: normalizedConfig,
+    }));
 
     const nowTs = Date.now();
     const snapId = `snap_pivot_${nowTs}`;
@@ -1786,7 +1810,7 @@ for (let r = 1; r <= 5; r++) {
             roomCode,
             label: targetPivotId
               ? `Pivot Tablo Güncellendi (${newSheetName})`
-              : `Pivot Tablo Eklendi (${newSheetName})`,
+              : `Yeni Pivot Tablo Eklendi (${newSheetName})`,
             createdBy: currentUser.name,
             createdByDepartment: currentUser.department,
             createdAt: new Date(nowTs).toISOString(),
@@ -1808,7 +1832,7 @@ for (let r = 1; r <= 5; r++) {
             userColor: currentUser.color,
             action: targetPivotId
               ? `"${newSheetName}" Pivot Tablo alanlarını güncelledi`
-              : `"${newSheetName}" adıyla yeni Pivot Tablo sayfası oluşturdu`,
+              : `"${newSheetName}" (${pivotRes.sourceSheetName}) adıyla yeni Pivot Tablo oluşturdu`,
             timestamp: nowTs,
             snapshotId: snapId,
           },
@@ -1817,13 +1841,16 @@ for (let r = 1; r <= 5; r++) {
       );
 
       showToast(
-        `📊 "${newSheetName}" hazır! Sağdaki "PivotTable Alanları" menüsünden anlık olarak alanları değiştirebilirsiniz.`
+        targetPivotId
+          ? `📊 "${newSheetName}" güncellendi!`
+          : `📊 "${newSheetName}" (${pivotRes.sourceSheetName} verisiyle) yeni sekme olarak oluşturuldu!`
       );
     }
   };
 
-  const handleCreatePivotSheet = (forceNewSheet: boolean | React.MouseEvent = false) => {
-    const isForceNew = forceNewSheet === true;
+  // Varsayılan olarak her "Yeni Pivot Ekle" çağrısı YENİ bir Pivot sekmesi (Pivot_Tablo_1, Pivot_Tablo_2, ...) oluşturur!
+  const handleCreatePivotSheet = (forceNewSheet: boolean | React.MouseEvent = true) => {
+    const isForceNew = typeof forceNewSheet === 'boolean' ? forceNewSheet : true;
     applyLivePivotUpdate(pivotConfig, { forceNewSheet: isForceNew, silentToast: false });
     setActiveModal(null);
     setActiveDrawer('pivot');
@@ -1840,6 +1867,69 @@ for (let r = 1; r <= 5; r++) {
     latestRestoredWorkbookRef.current = cloned;
     setWorkbookData(cloned);
     sheetHandleRef.current?.loadWorkbookSnapshot(cloned);
+  };
+
+  // Mevcut oluşturulmuş Pivot Tablolar (Pivot_Tablo_1, Pivot_Tablo_2 vb.) arasında geçiş yapma ve kendi bağımsız ayarlarını yükleme
+  const handleSelectExistingPivotSheet = (targetPivotId: string, switchSheetInGrid = true) => {
+    const liveWb = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+    if (!liveWb.sheets?.[targetPivotId]) return;
+    setActivePivotSheetId(targetPivotId);
+
+    const savedCfg =
+      pivotConfigsBySheetId[targetPivotId] ||
+      getSavedPivotConfigFromSheet(liveWb, targetPivotId);
+    if (savedCfg) {
+      setPivotConfig(savedCfg);
+    }
+    if (switchSheetInGrid) {
+      handleSwitchActiveSheet(targetPivotId);
+    }
+  };
+
+  // Aynı odada farklı bir sayfa (Sayfa 2, Sayfa 3 vb.) oluşturup oradan da Pivot alabilmek için hızlı yeni veri sayfası ekleme
+  const handleAddNewDataSheet = () => {
+    const liveWb = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+    const cloned: UniverWorkbookData = JSON.parse(JSON.stringify(liveWb));
+    const dataSheetCount = Object.keys(cloned.sheets || {}).filter(
+      (k) => !isPivotSheetEntry(k, cloned.sheets[k])
+    ).length;
+    const existingNames = new Set(
+      Object.values(cloned.sheets || {}).map((s: any) => String(s?.name || '').trim())
+    );
+    let nextNum = dataSheetCount + 1;
+    let sheetName = `Sayfa ${nextNum}`;
+    while (existingNames.has(sheetName)) {
+      nextNum++;
+      sheetName = `Sayfa ${nextNum}`;
+    }
+    const newSid = `sheet_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+    cloned.sheets[newSid] = {
+      id: newSid,
+      name: sheetName,
+      tabColor: '#10b981',
+      rowCount: 1000,
+      columnCount: 26,
+      defaultColumnWidth: 130,
+      defaultRowHeight: 25,
+      cellData: {},
+    };
+    cloned.sheetOrder = [
+      newSid,
+      ...(cloned.sheetOrder || Object.keys(cloned.sheets)).filter((id) => id !== newSid),
+    ];
+    latestRestoredWorkbookRef.current = cloned;
+    setWorkbookData(cloned);
+    sheetHandleRef.current?.loadWorkbookSnapshot(cloned);
+    setPivotConfig((prev) => ({
+      ...prev,
+      sourceSheetId: newSid,
+      rowColIdx: 0,
+      colColIdx: null,
+      valColIdx: 1,
+      filterColIdx: null,
+      filterValue: 'ALL',
+    }));
+    showToast(`📄 "${sheetName}" çalışma kitabına eklendi! Verilerinizi girip yeni Pivot oluşturabilirsiniz.`);
   };
 
   // KOŞULLU BİÇİMLENDİRME KURALI UYGULAMA
@@ -2681,10 +2771,40 @@ for (let r = 1; r <= 5; r++) {
     );
   };
 
-  // Canlı Pivot ve Sütun Hesaplamalarını Memoize Et (Büyük Excel dosyalarında her saniye yeniden hesaplanıp ekranı dondurmasını önler)
+  // Canlı Workbook ve Pivot Hesaplamalarını Memoize Et (Yeni eklenen sheetler ve canlı hücre verileri anında algılanır)
+  const liveWorkbookForPivot = useMemo(() => {
+    return (
+      sheetHandleRef.current?.getCurrentSnapshot() ||
+      latestRestoredWorkbookRef.current ||
+      workbookData
+    );
+  }, [workbookData, activeSelection.sheetId, activeSelection.cellRef, activeDrawer, activeModal, snapshots.length]);
+
+  const availableDataSheets = useMemo(() => {
+    const sheetsMap = liveWorkbookForPivot?.sheets || {};
+    const order =
+      liveWorkbookForPivot?.sheetOrder && liveWorkbookForPivot.sheetOrder.length > 0
+        ? liveWorkbookForPivot.sheetOrder
+        : Object.keys(sheetsMap);
+    return order
+      .map((id) => sheetsMap[id])
+      .filter((s: any) => s && !isPivotSheetEntry(s.id, s));
+  }, [liveWorkbookForPivot]);
+
+  const availablePivotSheets = useMemo(() => {
+    const sheetsMap = liveWorkbookForPivot?.sheets || {};
+    const order =
+      liveWorkbookForPivot?.sheetOrder && liveWorkbookForPivot.sheetOrder.length > 0
+        ? liveWorkbookForPivot.sheetOrder
+        : Object.keys(sheetsMap);
+    return order
+      .map((id) => sheetsMap[id])
+      .filter((s: any) => s && isPivotSheetEntry(s.id, s));
+  }, [liveWorkbookForPivot]);
+
   const livePivotResult = useMemo(
-    () => computePivotTable(workbookData, pivotConfig),
-    [workbookData, pivotConfig]
+    () => computePivotTable(liveWorkbookForPivot, pivotConfig),
+    [liveWorkbookForPivot, pivotConfig]
   );
 
   const currentSheetColumns = useMemo(
@@ -3583,43 +3703,99 @@ for (let r = 1; r <= 5; r++) {
             )}
           </button>
 
-          {/* PİVOT TABLO OLUŞTUR VE CANLI PIVOTTABLE ALANLARI (EXCEL PIVOT FIELDS) BUTONLARI */}
-          <div className="flex items-center">
+          {/* PİVOT TABLO OLUŞTUR VE CANLI PIVOTTABLE ALANLARI (ÇOKLU PİVOT & ÇOKLU SAYFA DESTEĞİ) */}
+          <div className="flex items-center gap-1">
+            <div className="flex items-center">
+              <button
+                onClick={() => {
+                  const liveWb =
+                    sheetHandleRef.current?.getCurrentSnapshot() ||
+                    latestRestoredWorkbookRef.current ||
+                    workbookData;
+                  const existingPivots = Object.entries(liveWb.sheets || {}).filter(([k, s]) =>
+                    isPivotSheetEntry(k, s)
+                  );
+                  if (existingPivots.length === 0) {
+                    applyLivePivotUpdate(pivotConfig, { forceNewSheet: true, silentToast: false });
+                    setActiveDrawer('pivot');
+                  } else {
+                    const targetPivotId =
+                      activePivotSheetId &&
+                      existingPivots.some(([k]) => k === activePivotSheetId)
+                        ? activePivotSheetId
+                        : existingPivots[existingPivots.length - 1][0];
+                    if (activeDrawer === 'pivot') {
+                      setActiveDrawer('none');
+                    } else {
+                      handleSelectExistingPivotSheet(targetPivotId, true);
+                      setActiveDrawer('pivot');
+                    }
+                  }
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-l-lg text-xs font-bold border transition cursor-pointer ${
+                  activeDrawer === 'pivot'
+                    ? 'bg-[#1e3a8a] text-white border-[#1e3a8a] shadow-xs'
+                    : 'bg-blue-50 hover:bg-blue-100 text-blue-800 border-blue-300'
+                }`}
+                title="Excel tarzı sağ yan menüde PivotTable Alanları ile aktif Pivot tablosunu düzenleyin veya yeni Pivot ekleyin"
+              >
+                <Table2 className="w-4 h-4" />
+                <span>PivotTable Alanları</span>
+                {availablePivotSheets.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-blue-700 text-white text-[10px] font-extrabold">
+                    {availablePivotSheets.length}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setActiveModal('pivot_modal')}
+                className="px-2 py-1.5 rounded-r-lg text-xs font-semibold bg-white hover:bg-blue-50 text-blue-700 border-y border-r border-blue-300 transition cursor-pointer"
+                title="Geniş ekran Pivot Tablo Oluşturucu & Önizleme penceresini aç"
+              >
+                <BarChart3 className="w-4 h-4 text-blue-600" />
+              </button>
+            </div>
+
             <button
               onClick={() => {
-                const liveWb = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
-                const existingPivot = Object.keys(liveWb.sheets || {}).find((k) =>
-                  k.startsWith('sheet_pivot_')
-                );
-                if (!existingPivot) {
-                  applyLivePivotUpdate(pivotConfig, { forceNewSheet: false, silentToast: false });
-                  setActiveDrawer('pivot');
-                } else {
-                  setActivePivotSheetId(existingPivot);
-                  if (activeDrawer === 'pivot') {
-                    setActiveDrawer('none');
-                  } else {
-                    handleSwitchActiveSheet(existingPivot);
-                    setActiveDrawer('pivot');
+                // Eğer kullanıcı şu an bir veri sayfasındaysa o sayfayı kaynak seçerek yeni Pivot oluşturma penceresini aç
+                const liveWb =
+                  sheetHandleRef.current?.getCurrentSnapshot() ||
+                  latestRestoredWorkbookRef.current ||
+                  workbookData;
+                const currentSheetObj = liveWb.sheets?.[activeSelection.sheetId];
+                if (
+                  activeSelection.sheetId &&
+                  !isPivotSheetEntry(activeSelection.sheetId, currentSheetObj)
+                ) {
+                  const hdrs = extractSheetHeaders(liveWb, activeSelection.sheetId);
+                  if (hdrs.length > 0) {
+                    const firstRow = hdrs[0]?.colIndex ?? 0;
+                    const firstVal =
+                      hdrs.find((h) => h.isNumeric && h.colIndex !== firstRow)?.colIndex ??
+                      hdrs[Math.min(1, hdrs.length - 1)]?.colIndex ??
+                      0;
+                    setPivotConfig((prev) => ({
+                      ...prev,
+                      sourceSheetId: activeSelection.sheetId,
+                      rowColIdx: firstRow,
+                      colColIdx: null,
+                      valColIdx: firstVal,
+                      filterColIdx: null,
+                      filterValue: 'ALL',
+                    }));
                   }
                 }
+                setActiveModal('pivot_modal');
               }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-l-lg text-xs font-bold border transition cursor-pointer ${
-                activeDrawer === 'pivot'
-                  ? 'bg-[#1e3a8a] text-white border-[#1e3a8a] shadow-xs'
-                  : 'bg-blue-50 hover:bg-blue-100 text-blue-800 border-blue-300'
-              }`}
-              title="Excel tarzı sağ yan menüde PivotTable Alanları (Satır, Sütun, Değer, Filtre) ile anlık oynayın"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 transition cursor-pointer"
+              title="Mevcut veriden veya farklı bir sayfadan 2., 3. veya daha fazla yeni Pivot Tablo sekmesi oluşturun"
             >
-              <Table2 className="w-4 h-4" />
-              <span>PivotTable Alanları (Canlı Pivot)</span>
-            </button>
-            <button
-              onClick={() => setActiveModal('pivot_modal')}
-              className="px-2 py-1.5 rounded-r-lg text-xs font-semibold bg-white hover:bg-blue-50 text-blue-700 border-y border-r border-blue-300 transition cursor-pointer"
-              title="Geniş ekran Pivot Tablo & Grafik Önizleme penceresini aç"
-            >
-              <BarChart3 className="w-4 h-4 text-blue-600" />
+              <Plus className="w-3.5 h-3.5 text-emerald-700" />
+              <span>
+                Yeni Pivot Ekle
+                {availablePivotSheets.length > 0 ? ` (Pivot ${availablePivotSheets.length + 1})` : ''}
+              </span>
             </button>
           </div>
 
@@ -3871,9 +4047,16 @@ for (let r = 1; r <= 5; r++) {
                 value: sel.value,
                 formula: sel.formula,
               });
-              // Eğer kullanıcı bir Pivot Tablo sekmesine tıkladıysa, tıpkı Excel'deki gibi sağda PivotTable Alanları menüsünü otomatik aç!
-              if (sel.sheetId && sel.sheetId.startsWith('sheet_pivot_')) {
-                setActivePivotSheetId(sel.sheetId);
+              // Eğer kullanıcı herhangi bir Pivot Tablo sekmesine tıkladıysa, o Pivot'un kendi ayarlarını yükle ve sağda PivotTable Alanları menüsünü aç!
+              const liveWbForSel =
+                sheetHandleRef.current?.getCurrentSnapshot() ||
+                latestRestoredWorkbookRef.current ||
+                workbookData;
+              if (
+                sel.sheetId &&
+                isPivotSheetEntry(sel.sheetId, liveWbForSel?.sheets?.[sel.sheetId])
+              ) {
+                handleSelectExistingPivotSheet(sel.sheetId, false);
                 setActiveDrawer((prev) => (prev === 'none' ? 'pivot' : prev));
               }
               roomClientRef.current?.sendPresence({
@@ -4279,47 +4462,110 @@ for (let r = 1; r <= 5; r++) {
             </div>
 
             <div className="p-3.5 space-y-3.5 overflow-y-auto flex-1 text-xs bg-slate-50/60">
-              {/* ÜST: KAYNAK VERİ SAYFASI SEÇİMİ VE SAYFA GEÇİŞ BUTONLARI */}
+              {/* ÜST 0: ÇOKLU PİVOT YÖNETİCİSİ — AKTİF PİVOT SEÇİMİ VE YENİ (2., 3. ...) PİVOT EKLEME */}
+              <div className="bg-blue-950 text-white p-3 rounded-xl border border-blue-800 space-y-2.5 shadow-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[11px] font-extrabold text-blue-200 uppercase tracking-wider">
+                      Odadaki Pivot Tablolar ({availablePivotSheets.length} Adet)
+                    </div>
+                    <div className="text-[10px] text-blue-300">
+                      Düzenlemek istediğiniz Pivot sekmesini seçin veya yeni Pivot ekleyin
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleCreatePivotSheet(true)}
+                    className="px-2.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-[11px] flex items-center gap-1 shadow-xs transition cursor-pointer shrink-0"
+                    title="Seçili kaynak veriden yeni bir bağımsız Pivot Tablo sekmesi (Pivot_Tablo_2, Pivot_Tablo_3 vb.) oluşturur"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ Yeni Pivot ({availablePivotSheets.length + 1}. Pivot)</span>
+                  </button>
+                </div>
+
+                {availablePivotSheets.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {availablePivotSheets.map((ps, idx) => {
+                      const isCurrent =
+                        activePivotSheetId === ps.id ||
+                        (!activePivotSheetId && idx === availablePivotSheets.length - 1);
+                      return (
+                        <button
+                          key={ps.id}
+                          type="button"
+                          onClick={() => handleSelectExistingPivotSheet(ps.id, true)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1.5 border transition cursor-pointer ${
+                            isCurrent
+                              ? 'bg-white text-blue-950 border-white shadow-xs'
+                              : 'bg-blue-900/70 hover:bg-blue-800 text-blue-100 border-blue-700'
+                          }`}
+                        >
+                          <Table2 className="w-3 h-3 shrink-0" />
+                          <span>{ps.name}</span>
+                          {isCurrent && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* ÜST 1: KAYNAK VERİ SAYFASI SEÇİMİ (AYNI VEYA FARKLI SHEETLER) VE YENİ SAYFA EKLEME */}
               <div className="bg-white p-3 rounded-xl border border-slate-200 space-y-2 shadow-2xs">
                 <div className="flex items-center justify-between gap-2">
                   <label className="font-bold text-slate-800 text-[11px]">
-                    Kaynak Veri Sayfası:
+                    Kaynak Veri Sayfası (Sheet):
                   </label>
-                  <select
-                    value={livePivotResult.sourceSheetId}
-                    onChange={(e) => {
-                      const nextSourceId = e.target.value;
-                      const nextHeaders = extractSheetHeaders(workbookData, nextSourceId);
-                      const nextRowCol = nextHeaders[0]?.colIndex ?? 0;
-                      const nextValCol =
-                        nextHeaders.find((h) => h.isNumeric && h.colIndex !== nextRowCol)
-                          ?.colIndex ??
-                        nextHeaders[Math.min(1, nextHeaders.length - 1)]?.colIndex ??
-                        0;
-                      applyLivePivotUpdate(
-                        {
-                          ...pivotConfig,
-                          sourceSheetId: nextSourceId,
-                          rowColIdx: nextRowCol,
-                          colColIdx: null,
-                          valColIdx: nextValCol,
-                          filterColIdx: null,
-                          filterValue: 'ALL',
-                        },
-                        { forceNewSheet: false, silentToast: true }
-                      );
-                    }}
-                    className="bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-900"
+                  <button
+                    type="button"
+                    onClick={handleAddNewDataSheet}
+                    className="px-2 py-0.5 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer transition"
+                    title="Odaya Sayfa 2, Sayfa 3 gibi yeni bir veri sayfası ekleyin"
                   >
-                    {Object.values(workbookData.sheets || {})
-                      .filter((s: any) => s && !String(s.id).startsWith('sheet_pivot_'))
-                      .map((s: any) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name || s.id}
-                        </option>
-                      ))}
-                  </select>
+                    <Plus className="w-3 h-3" />
+                    <span>Yeni Veri Sayfası Aç</span>
+                  </button>
                 </div>
+
+                <select
+                  value={livePivotResult.sourceSheetId}
+                  onChange={(e) => {
+                    const nextSourceId = e.target.value;
+                    const liveWb =
+                      sheetHandleRef.current?.getCurrentSnapshot() ||
+                      latestRestoredWorkbookRef.current ||
+                      workbookData;
+                    const nextHeaders = extractSheetHeaders(liveWb, nextSourceId);
+                    const nextRowCol = nextHeaders[0]?.colIndex ?? 0;
+                    const nextValCol =
+                      nextHeaders.find((h) => h.isNumeric && h.colIndex !== nextRowCol)
+                        ?.colIndex ??
+                      nextHeaders[Math.min(1, nextHeaders.length - 1)]?.colIndex ??
+                      0;
+                    applyLivePivotUpdate(
+                      {
+                        ...pivotConfig,
+                        sourceSheetId: nextSourceId,
+                        rowColIdx: nextRowCol,
+                        colColIdx: null,
+                        valColIdx: nextValCol,
+                        filterColIdx: null,
+                        filterValue: 'ALL',
+                      },
+                      { forceNewSheet: false, silentToast: true }
+                    );
+                  }}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900"
+                >
+                  {availableDataSheets.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      📄 {s.name}
+                    </option>
+                  ))}
+                </select>
 
                 <div className="grid grid-cols-2 gap-1.5 pt-1">
                   <button
@@ -4333,7 +4579,7 @@ for (let r = 1; r <= 5; r++) {
                     className="py-1.5 px-2.5 rounded-lg bg-[#1e3a8a] hover:bg-blue-900 text-white font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer transition"
                   >
                     <RefreshCw className="w-3 h-3" />
-                    <span>Pivotu Göster / Yenile</span>
+                    <span>Seçili Pivotu Yenile</span>
                   </button>
                   <button
                     type="button"
@@ -5597,8 +5843,65 @@ for (let r = 1; r <= 5; r++) {
             <div className="flex-1 grid grid-cols-1 md:grid-cols-12 overflow-hidden">
               {/* SOL: PİVOT ALAN SEÇİMLERİ (EXCEL PIVOTTABLE FIELDS) */}
               <div className="md:col-span-4 border-r border-slate-200 bg-slate-50 p-4 space-y-4 overflow-y-auto text-xs">
-                <div className="font-bold text-slate-800 text-sm border-b border-slate-200 pb-2">
-                  Pivot Tablo Alanlarını Seçin
+                <div className="font-bold text-slate-800 text-sm border-b border-slate-200 pb-2 flex items-center justify-between">
+                  <span>Pivot Tablo Alanlarını Seçin</span>
+                  {availablePivotSheets.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 text-[10px] font-bold">
+                      Mevcut: {availablePivotSheets.length} Pivot
+                    </span>
+                  )}
+                </div>
+
+                {/* 0. Kaynak Veri Sayfası (Aynı veya Farklı Sheet Seçimi) */}
+                <div className="bg-blue-50/70 p-3 rounded-xl border border-blue-200 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="block font-bold text-blue-950">
+                      0. Kaynak Veri Sayfası (Sheet)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleAddNewDataSheet}
+                      className="px-2 py-0.5 rounded bg-white hover:bg-blue-100 text-blue-800 border border-blue-300 text-[10px] font-bold cursor-pointer"
+                    >
+                      + Yeni Sayfa
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-blue-800/80">
+                    Aynı sayfadan veya farklı bir çalışma sayfasından yeni Pivot oluşturabilirsiniz
+                  </p>
+                  <select
+                    value={livePivotResult.sourceSheetId}
+                    onChange={(e) => {
+                      const nextSourceId = e.target.value;
+                      const liveWb =
+                        sheetHandleRef.current?.getCurrentSnapshot() ||
+                        latestRestoredWorkbookRef.current ||
+                        workbookData;
+                      const nextHeaders = extractSheetHeaders(liveWb, nextSourceId);
+                      const nextRowCol = nextHeaders[0]?.colIndex ?? 0;
+                      const nextValCol =
+                        nextHeaders.find((h) => h.isNumeric && h.colIndex !== nextRowCol)
+                          ?.colIndex ??
+                        nextHeaders[Math.min(1, nextHeaders.length - 1)]?.colIndex ??
+                        0;
+                      setPivotConfig((prev) => ({
+                        ...prev,
+                        sourceSheetId: nextSourceId,
+                        rowColIdx: nextRowCol,
+                        colColIdx: null,
+                        valColIdx: nextValCol,
+                        filterColIdx: null,
+                        filterValue: 'ALL',
+                      }));
+                    }}
+                    className="w-full bg-white border border-blue-300 rounded-lg px-2.5 py-2 text-slate-900 font-bold"
+                  >
+                    {availableDataSheets.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        📄 {s.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* 1. Satır Alanı */}
@@ -5761,11 +6064,14 @@ for (let r = 1; r <= 5; r++) {
                       </p>
                     </div>
                     <button
-                      onClick={handleCreatePivotSheet}
+                      type="button"
+                      onClick={() => handleCreatePivotSheet(true)}
                       className="px-4 py-2 rounded-xl bg-[#107c41] hover:bg-[#0c5e31] text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition cursor-pointer"
                     >
                       <Plus className="w-4 h-4" />
-                      <span>Yeni Sayfa Sekmesi Olarak Tabloya Ekle</span>
+                      <span>
+                        Yeni Pivot Sekmesi Olarak Ekle (Pivot_Tablo_{availablePivotSheets.length + 1})
+                      </span>
                     </button>
                   </div>
 
@@ -5889,18 +6195,29 @@ for (let r = 1; r <= 5; r++) {
                   </div>
                 </div>
 
-                <div className="pt-4 border-t border-slate-200 flex justify-end gap-2">
+                <div className="pt-4 border-t border-slate-200 flex flex-wrap justify-end gap-2">
                   <button
+                    type="button"
                     onClick={() => setActiveModal(null)}
                     className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold cursor-pointer"
                   >
                     Kapat
                   </button>
+                  {availablePivotSheets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleCreatePivotSheet(false)}
+                      className="px-4 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 text-xs font-bold cursor-pointer"
+                    >
+                      🔄 Seçili Mevcut Pivotu Güncelle
+                    </button>
+                  )}
                   <button
-                    onClick={handleCreatePivotSheet}
+                    type="button"
+                    onClick={() => handleCreatePivotSheet(true)}
                     className="px-5 py-2 rounded-xl bg-[#107c41] hover:bg-[#0c5e31] text-white text-xs font-bold cursor-pointer"
                   >
-                    ➕ Yeni Sayfa Sekmesi Olarak Tabloya Ekle
+                    ➕ Yeni Pivot Sekmesi Olarak Ekle (Pivot_Tablo_{availablePivotSheets.length + 1})
                   </button>
                 </div>
               </div>
