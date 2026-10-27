@@ -2,6 +2,7 @@ import { UniverWorkbookData } from './excelZeroUpload';
 import { colIndexToLetter } from './collaboration';
 
 export type PivotAggFunc = 'SUM' | 'AVERAGE' | 'COUNT' | 'MAX' | 'MIN';
+export type PivotSortOrder = 'desc' | 'asc' | 'alpha';
 
 export interface PivotConfig {
   sourceSheetId: string;
@@ -11,6 +12,15 @@ export interface PivotConfig {
   aggFunc: PivotAggFunc;
   filterColIdx: number | null;
   filterValue: string;
+  sortOrder?: PivotSortOrder;
+}
+
+export interface PivotHeaderItem {
+  colIndex: number;
+  colLetter: string;
+  title: string;
+  rawName: string;
+  isNumeric: boolean;
 }
 
 export interface PivotResultRow {
@@ -21,7 +31,9 @@ export interface PivotResultRow {
 }
 
 export interface PivotComputationResult {
-  headers: { colIndex: number; colLetter: string; title: string }[];
+  sourceSheetId: string;
+  sourceSheetName: string;
+  headers: PivotHeaderItem[];
   uniqueColKeys: string[];
   rows: PivotResultRow[];
   colTotals: Record<string, number>;
@@ -30,37 +42,116 @@ export interface PivotComputationResult {
   filterOptions: string[];
 }
 
+export function resolveSourceSheetId(
+  workbookData: UniverWorkbookData,
+  preferredSheetId?: string
+): string {
+  const sheetIds =
+    workbookData.sheetOrder && workbookData.sheetOrder.length > 0
+      ? workbookData.sheetOrder
+      : Object.keys(workbookData.sheets || {});
+
+  if (
+    preferredSheetId &&
+    workbookData.sheets?.[preferredSheetId] &&
+    !preferredSheetId.startsWith('sheet_pivot_')
+  ) {
+    return preferredSheetId;
+  }
+
+  const firstNonPivot = sheetIds.find(
+    (id) => workbookData.sheets?.[id] && !id.startsWith('sheet_pivot_')
+  );
+  return firstNonPivot || sheetIds[0] || 'sheet_1';
+}
+
 export function extractSheetHeaders(
   workbookData: UniverWorkbookData,
   sheetId?: string
-): { colIndex: number; colLetter: string; title: string }[] {
-  const sid =
-    sheetId && workbookData.sheets?.[sheetId]
-      ? sheetId
-      : workbookData.sheetOrder?.[0] || Object.keys(workbookData.sheets || {})[0];
+): PivotHeaderItem[] {
+  const sid = resolveSourceSheetId(workbookData, sheetId);
   const sheet = workbookData.sheets?.[sid];
   if (!sheet || !sheet.cellData) return [];
 
-  const headerRow = sheet.cellData[0] || {};
-  const maxCols = Math.max(
-    ...Object.keys(headerRow)
-      .map(Number)
-      .filter((n) => !isNaN(n)),
-    7
-  );
+  const cellData = sheet.cellData;
+  const headerRow = cellData[0] || {};
 
-  const result: { colIndex: number; colLetter: string; title: string }[] = [];
-  for (let c = 0; c <= maxCols; c++) {
-    const raw = headerRow[c]?.v;
-    const letter = colIndexToLetter(c);
-    if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
-      result.push({
-        colIndex: c,
-        colLetter: letter,
-        title: `${letter} — ${String(raw).trim()}`,
-      });
+  // İlk 40 satırı tarayarak dolu sütunları ve sayısal olup olmadıklarını tespit et
+  const colIndicesSet = new Set<number>();
+  Object.keys(headerRow).forEach((k) => {
+    const n = Number(k);
+    if (!isNaN(n) && headerRow[n]?.v !== undefined && String(headerRow[n]?.v).trim() !== '') {
+      colIndicesSet.add(n);
+    }
+  });
+
+  const sampleRowKeys = Object.keys(cellData)
+    .map(Number)
+    .filter((r) => !isNaN(r) && r > 0)
+    .sort((a, b) => a - b)
+    .slice(0, 40);
+
+  const numericStats: Record<number, { num: number; text: number }> = {};
+
+  for (const r of sampleRowKeys) {
+    const rowObj = cellData[r];
+    if (!rowObj) continue;
+    for (const cKey of Object.keys(rowObj)) {
+      const c = Number(cKey);
+      if (isNaN(c)) continue;
+      const val = rowObj[c]?.v;
+      if (val !== undefined && val !== null && String(val).trim() !== '') {
+        colIndicesSet.add(c);
+        if (!numericStats[c]) numericStats[c] = { num: 0, text: 0 };
+        const parsed =
+          typeof val === 'number'
+            ? val
+            : Number(String(val).replace(/[^0-9.-]/g, ''));
+        if (typeof val === 'number' || (!isNaN(parsed) && /[0-9]/.test(String(val)))) {
+          numericStats[c].num++;
+        } else {
+          numericStats[c].text++;
+        }
+      }
     }
   }
+
+  // Eğer sayfa tamamen boşsa bile A, B, C, D sütunlarını göster ki kullanıcı seçim yapabilsin
+  if (colIndicesSet.size === 0) {
+    return [0, 1, 2, 3].map((c) => {
+      const letter = colIndexToLetter(c);
+      return {
+        colIndex: c,
+        colLetter: letter,
+        rawName: `${letter} Sütunu`,
+        title: `${letter} — ${letter} Sütunu`,
+        isNumeric: c >= 1,
+      };
+    });
+  }
+
+  const sortedCols = Array.from(colIndicesSet).sort((a, b) => a - b);
+  const result: PivotHeaderItem[] = [];
+
+  for (const c of sortedCols) {
+    const raw = headerRow[c]?.v;
+    const letter = colIndexToLetter(c);
+    const rawName =
+      raw !== undefined && raw !== null && String(raw).trim() !== ''
+        ? String(raw).trim()
+        : `${letter} Sütunu`;
+    const stat = numericStats[c];
+    const isNumeric = stat ? stat.num > 0 && stat.num >= stat.text : false;
+
+    result.push({
+      colIndex: c,
+      colLetter: letter,
+      rawName,
+      title: `${letter} — ${rawName}`,
+      isNumeric,
+    });
+  }
+
   return result;
 }
 
@@ -68,11 +159,19 @@ export function computePivotTable(
   workbookData: UniverWorkbookData,
   config: PivotConfig
 ): PivotComputationResult {
-  const headers = extractSheetHeaders(workbookData, config.sourceSheetId);
-  const sid =
-    config.sourceSheetId && workbookData.sheets?.[config.sourceSheetId]
-      ? config.sourceSheetId
-      : workbookData.sheetOrder?.[0] || Object.keys(workbookData.sheets || {})[0];
+  const sid = resolveSourceSheetId(workbookData, config.sourceSheetId);
+  const sourceSheetName = workbookData.sheets?.[sid]?.name || 'Sayfa 1';
+  const headers = extractSheetHeaders(workbookData, sid);
+
+  const validRowColIdx = headers.some((h) => h.colIndex === config.rowColIdx)
+    ? config.rowColIdx
+    : headers[0]?.colIndex ?? 0;
+
+  const validValColIdx = headers.some((h) => h.colIndex === config.valColIdx)
+    ? config.valColIdx
+    : headers.find((h) => h.isNumeric && h.colIndex !== validRowColIdx)?.colIndex ??
+      headers[Math.min(1, headers.length - 1)]?.colIndex ??
+      0;
 
   const cellData = workbookData.sheets?.[sid]?.cellData || {};
   const rowKeys = Object.keys(cellData)
@@ -103,14 +202,14 @@ export function computePivotTable(
     if (!hasAnyValue) continue;
 
     if (config.filterColIdx !== null && config.filterColIdx >= 0) {
-      const fVal = String(rowObj[config.filterColIdx]?.v ?? '(Boş)').trim();
+      const fVal = String(rowObj[config.filterColIdx]?.v ?? '(Boş)').trim() || '(Boş)';
       filterSet.add(fVal);
       if (config.filterValue && config.filterValue !== 'ALL' && fVal !== config.filterValue) {
         continue;
       }
     }
 
-    const rKey = String(rowObj[config.rowColIdx]?.v ?? '(Belirtilmemiş)').trim() || '(Boş)';
+    const rKey = String(rowObj[validRowColIdx]?.v ?? '(Belirtilmemiş)').trim() || '(Boş)';
     const cKey =
       config.colColIdx !== null && config.colColIdx >= 0
         ? String(rowObj[config.colColIdx]?.v ?? 'Toplam').trim() || '(Boş)'
@@ -118,8 +217,11 @@ export function computePivotTable(
 
     colKeySet.add(cKey);
 
-    const rawVal = rowObj[config.valColIdx]?.v;
-    const numVal = typeof rawVal === 'number' ? rawVal : Number(String(rawVal || '').replace(/[^0-9.-]/g, ''));
+    const rawVal = rowObj[validValColIdx]?.v;
+    const numVal =
+      typeof rawVal === 'number'
+        ? rawVal
+        : Number(String(rawVal || '').replace(/[^0-9.-]/g, ''));
     const validNum = !isNaN(numVal) ? numVal : 0;
 
     if (!groupMap[rKey]) groupMap[rKey] = {};
@@ -130,7 +232,7 @@ export function computePivotTable(
 
   const uniqueColKeys =
     config.colColIdx !== null && config.colColIdx >= 0
-      ? Array.from(colKeySet).slice(0, 10)
+      ? Array.from(colKeySet).slice(0, 12)
       : ['Değer'];
 
   const aggregateArray = (arr: number[], fn: PivotAggFunc): number => {
@@ -169,7 +271,14 @@ export function computePivotTable(
     });
   });
 
-  rows.sort((a, b) => b.rowTotal - a.rowTotal);
+  const sortOrder = config.sortOrder || 'desc';
+  if (sortOrder === 'asc') {
+    rows.sort((a, b) => a.rowTotal - b.rowTotal);
+  } else if (sortOrder === 'alpha') {
+    rows.sort((a, b) => a.rowKey.localeCompare(b.rowKey, 'tr'));
+  } else {
+    rows.sort((a, b) => b.rowTotal - a.rowTotal);
+  }
 
   const colTotals: Record<string, number> = {};
   uniqueColKeys.forEach((cKey) => {
@@ -179,6 +288,8 @@ export function computePivotTable(
   const grandTotal = aggregateArray(allRawValues, config.aggFunc);
 
   return {
+    sourceSheetId: sid,
+    sourceSheetName,
     headers,
     uniqueColKeys,
     rows,
@@ -190,26 +301,46 @@ export function computePivotTable(
 }
 
 /**
- * Oluşturulan Pivot Tabloyu Excel Çalışma Kitabının içine gerçek bir yeni çalışma sayfası (Sheet)
- * olarak ekler ve yeni workbookData döndürür.
+ * Oluşturulan veya güncellenen Pivot Tabloyu Excel Çalışma Kitabının içine gerçek bir çalışma sayfası (Sheet)
+ * olarak ekler veya mevcut Pivot sayfasını (existingPivotSheetId) ANLIK OLARAK yerinde günceller!
  */
 export function insertPivotSheetIntoWorkbook(
   workbookData: UniverWorkbookData,
   pivotResult: PivotComputationResult,
-  config: PivotConfig
-): { updatedWorkbook: UniverWorkbookData; newSheetName: string } {
+  config: PivotConfig,
+  existingPivotSheetId?: string | null
+): { updatedWorkbook: UniverWorkbookData; newSheetName: string; pivotSheetId: string } {
   const clone: UniverWorkbookData = JSON.parse(JSON.stringify(workbookData));
-  const existingPivotCount = Object.keys(clone.sheets || {}).filter((k) =>
+  const existingPivotSheets = Object.keys(clone.sheets || {}).filter((k) =>
     k.startsWith('sheet_pivot_')
-  ).length;
+  );
 
-  const newSheetId = `sheet_pivot_${Date.now()}`;
-  const newSheetName = `Pivot_Tablo_${existingPivotCount + 1}`;
+  const reuseId =
+    existingPivotSheetId && clone.sheets?.[existingPivotSheetId]
+      ? existingPivotSheetId
+      : null;
+
+  const newSheetId = reuseId || `sheet_pivot_${Date.now()}`;
+  const newSheetName = reuseId
+    ? clone.sheets[reuseId].name || 'Pivot_Tablo_1'
+    : `Pivot_Tablo_${existingPivotSheets.length + 1}`;
 
   const rowHeaderTitle =
-    pivotResult.headers.find((h) => h.colIndex === config.rowColIdx)?.title || 'Satır Etiketleri';
+    pivotResult.headers.find((h) => h.colIndex === config.rowColIdx)?.title ||
+    pivotResult.headers[0]?.title ||
+    'Satır Etiketleri';
+  const colHeaderTitle =
+    config.colColIdx !== null
+      ? pivotResult.headers.find((h) => h.colIndex === config.colColIdx)?.title || 'Sütunlar'
+      : 'Tek Boyut';
   const valHeaderTitle =
-    pivotResult.headers.find((h) => h.colIndex === config.valColIdx)?.title || 'Değerler';
+    pivotResult.headers.find((h) => h.colIndex === config.valColIdx)?.title ||
+    pivotResult.headers[Math.min(1, pivotResult.headers.length - 1)]?.title ||
+    'Değerler';
+  const filterHeaderTitle =
+    config.filterColIdx !== null
+      ? pivotResult.headers.find((h) => h.colIndex === config.filterColIdx)?.title || 'Filtre'
+      : 'Yok';
 
   const aggLabelMap: Record<PivotAggFunc, string> = {
     SUM: 'Toplam',
@@ -227,6 +358,12 @@ export function insertPivotSheetIntoWorkbook(
       cl: { rgb: '#ffffff' },
       fs: 11,
     },
+    pivot_submeta: {
+      bl: 1,
+      bg: { rgb: '#eff6ff' },
+      cl: { rgb: '#1d4ed8' },
+      fs: 10,
+    },
     pivot_total: {
       bl: 1,
       bg: { rgb: '#dbeafe' },
@@ -243,6 +380,33 @@ export function insertPivotSheetIntoWorkbook(
       v: `PİVOT RAPORU: ${rowHeaderTitle} bazında ${aggLabelMap[config.aggFunc]} (${valHeaderTitle})`,
       t: 1,
       s: 'pivot_total',
+    },
+  };
+
+  // Satır 1: Aktif Pivot Alanları özeti (Kullanıcı sağdaki menüden değiştirdikçe anında güncellenir)
+  cellData[1] = {
+    0: {
+      v: `Satır: ${rowHeaderTitle}`,
+      t: 1,
+      s: 'pivot_submeta',
+    },
+    1: {
+      v: `Sütun: ${colHeaderTitle}`,
+      t: 1,
+      s: 'pivot_submeta',
+    },
+    2: {
+      v: `Değer: ${aggLabelMap[config.aggFunc]} (${valHeaderTitle})`,
+      t: 1,
+      s: 'pivot_submeta',
+    },
+    3: {
+      v:
+        config.filterColIdx !== null
+          ? `Filtre: ${filterHeaderTitle} = ${config.filterValue === 'ALL' ? 'Tümü' : config.filterValue}`
+          : 'Filtre: Tümü (Filtre Yok)',
+      t: 1,
+      s: 'pivot_submeta',
     },
   };
 
@@ -330,15 +494,18 @@ export function insertPivotSheetIntoWorkbook(
     tabColor: '#2563eb',
     rowCount: Math.max(currentRow + 100, 500),
     columnCount: 20,
-    defaultColumnWidth: 165,
+    defaultColumnWidth: 175,
     defaultRowHeight: 26,
     cellData,
   };
 
-  // Yeni oluşturulan Pivot sekmesini ilk sıraya veya aktif görünür sıraya koyalım
-  clone.sheetOrder = [newSheetId, ...(clone.sheetOrder || [])];
+  // Oluşturulan veya güncellenen Pivot sekmesini ilk sıraya (aktif görünür sekmeye) koyalım
+  const existingOrder = (clone.sheetOrder || Object.keys(clone.sheets)).filter(
+    (id) => id !== newSheetId
+  );
+  clone.sheetOrder = [newSheetId, ...existingOrder];
 
-  return { updatedWorkbook: clone, newSheetName };
+  return { updatedWorkbook: clone, newSheetName, pivotSheetId: newSheetId };
 }
 
 /**
