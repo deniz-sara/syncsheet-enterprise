@@ -228,10 +228,29 @@ export async function dbUpsertRoom(room: any): Promise<void> {
   localMap[clean] = room;
   writeLocalRoomsMap(localMap);
 
-  // Supabase'e kalıcı olarak yaz
+  // Supabase'e kalıcı olarak yaz (Aşırı büyük stres testi snapshot'larını kırparak hızlı senkronize et)
   const cfg = getSupabaseConfig();
   if (cfg) {
     try {
+      const cloudRoom = {
+        ...room,
+        recentCellDeltas: Array.isArray(room.recentCellDeltas)
+          ? room.recentCellDeltas.slice(-50)
+          : [],
+        auditLog: Array.isArray(room.auditLog) ? room.auditLog.slice(0, 50) : [],
+        snapshots: Array.isArray(room.snapshots)
+          ? room.snapshots.slice(0, 12).map((s: any, idx: number) => {
+              // Çok büyük (>1MB) eski stres testi snapshot'larında sadece meta veriyi tut
+              const snapSize = s?.workbookData ? JSON.stringify(s.workbookData).length : 0;
+              if (snapSize > 1000000 && idx > 0) {
+                const { workbookData, ...metaOnly } = s;
+                return metaOnly;
+              }
+              return s;
+            })
+          : [],
+      };
+
       const endpoint = `${cfg.url}/rest/v1/syncsheet_rooms?on_conflict=room_code`;
       await fetch(endpoint, {
         method: 'POST',
@@ -241,7 +260,7 @@ export async function dbUpsertRoom(room: any): Promise<void> {
         body: JSON.stringify([
           {
             room_code: clean,
-            data: room,
+            data: cloudRoom,
             updated_at: new Date().toISOString(),
           },
         ]),
