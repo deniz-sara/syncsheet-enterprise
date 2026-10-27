@@ -3983,7 +3983,14 @@ for (let r = 1; r <= 5; r++) {
                         formula: edit.formula,
                       },
                     }),
-                  }).catch(() => {});
+                  })
+                    .then((r) => r.json())
+                    .then((d) => {
+                      if (d?.version) {
+                        setRoomVersion(d.version);
+                      }
+                    })
+                    .catch(() => {});
                 }
               }, 25);
 
@@ -3993,10 +4000,16 @@ for (let r = 1; r <= 5; r++) {
                 second: '2-digit',
               });
 
+              const displayValSummary =
+                edit.formula ||
+                (edit.value !== undefined && edit.value !== ''
+                  ? String(edit.value)
+                  : 'Biçimlendirildi');
+
               const autoMeta: SnapshotMeta = {
                 id: autoSnapId,
                 roomCode,
-                label: `${cellRef} düzenlendi (${edit.formula || edit.value})`,
+                label: `${cellRef} düzenlendi (${displayValSummary})`,
                 createdBy: currentUser.name,
                 createdByDepartment: currentUser.department,
                 createdAt: new Date(now).toISOString(),
@@ -4023,7 +4036,7 @@ for (let r = 1; r <= 5; r++) {
                     cellRef,
                     sheetName: activeSelection.sheetName,
                     oldValue: edit.previousFormula || edit.previousValue,
-                    newValue: edit.formula || edit.value,
+                    newValue: displayValSummary,
                     timestamp: now,
                     snapshotId: autoSnapId,
                   },
@@ -4033,15 +4046,17 @@ for (let r = 1; r <= 5; r++) {
                   .slice(0, 80)
               );
 
-              roomClientRef.current?.sendCellUpdate({
-                senderId: currentUser.id,
-                senderName: currentUser.name,
-                sheetId: edit.sheetId,
-                row: edit.row,
-                col: edit.col,
-                value: edit.value,
-                formula: edit.formula,
-              });
+              if (edit.value !== undefined || edit.formula !== undefined) {
+                roomClientRef.current?.sendCellUpdate({
+                  senderId: currentUser.id,
+                  senderName: currentUser.name,
+                  sheetId: edit.sheetId,
+                  row: edit.row,
+                  col: edit.col,
+                  value: edit.value,
+                  formula: edit.formula,
+                });
+              }
 
               roomClientRef.current?.sendPresence({
                 userId: currentUser.id,

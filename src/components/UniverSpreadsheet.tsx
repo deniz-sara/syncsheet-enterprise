@@ -340,13 +340,42 @@ export default function UniverSpreadsheet({
     cellCacheRef.current = cache;
   };
 
-  // Yardımcı: Bellekteki currentWorkbookDataRef içine yapılan hücre değişikliğini anında işle
+  // Yardımcı: Univer motorundan anlık tam Workbook görüntüsünü (tüm stiller, kenarlıklar, kalın/üstü çizili, birleştirmeler dahil) güvenli bir derin kopya olarak al
+  const syncLiveSnapshotFromUniver = (): UniverWorkbookData => {
+    try {
+      const activeWb = univerAPIRef.current?.getActiveWorkbook();
+      const rawSnap =
+        activeWb && typeof activeWb.save === 'function'
+          ? activeWb.save()
+          : activeWb && typeof activeWb.getSnapshot === 'function'
+          ? activeWb.getSnapshot()
+          : null;
+
+      if (rawSnap && rawSnap.sheets) {
+        const merged: UniverWorkbookData = JSON.parse(
+          JSON.stringify({
+            ...rawSnap,
+            id: currentWorkbookDataRef.current?.id || rawSnap.id,
+            name: currentWorkbookDataRef.current?.name || rawSnap.name,
+          })
+        );
+        currentWorkbookDataRef.current = merged;
+        return merged;
+      }
+    } catch (e) {
+      // ignore
+    }
+    return JSON.parse(JSON.stringify(currentWorkbookDataRef.current));
+  };
+
+  // Yardımcı: Bellekteki currentWorkbookDataRef içine yapılan hücre değişikliğini mevcut değeri ve stili ezmeden güvenle işle
   const syncCellIntoMemoryWorkbook = (
     sheetId: string,
     row: number,
     col: number,
     val: any,
-    formula?: string
+    formula?: string,
+    stylePatch?: any
   ) => {
     const wb = currentWorkbookDataRef.current;
     if (!wb || !wb.sheets) return;
@@ -358,15 +387,43 @@ export default function UniverSpreadsheet({
     if (!sheet.cellData) sheet.cellData = {};
     if (!sheet.cellData[row]) sheet.cellData[row] = {};
     const existingCell = sheet.cellData[row][col] || {};
-    sheet.cellData[row][col] = {
+
+    // EĞER val undefined ise (örneğin Kalın, Üstü Çizili, Kenarlık, Biçim Boyacısı gibi sadece stil değiştiren işlemlerde)
+    // hücrenin mevcut değerini (existingCell.v) ASLA SİLME!
+    const nextVal = val !== undefined ? val : existingCell.v;
+    const nextFormula =
+      formula !== undefined ? formula || undefined : existingCell.f;
+
+    const updatedCell: Record<string, any> = {
       ...existingCell,
-      v: val,
-      t: typeof val === 'number' ? 2 : 1,
-      f: formula || undefined,
     };
+
+    if (nextVal !== undefined) {
+      updatedCell.v = nextVal;
+      updatedCell.t = typeof nextVal === 'number' ? 2 : 1;
+    }
+    if (nextFormula !== undefined) {
+      updatedCell.f = nextFormula;
+    } else {
+      delete updatedCell.f;
+    }
+    if (stylePatch !== undefined) {
+      if (
+        typeof stylePatch === 'object' &&
+        stylePatch !== null &&
+        typeof existingCell.s === 'object' &&
+        existingCell.s !== null
+      ) {
+        updatedCell.s = { ...existingCell.s, ...stylePatch };
+      } else {
+        updatedCell.s = stylePatch;
+      }
+    }
+
+    sheet.cellData[row][col] = updatedCell;
   };
 
-  // Yardımcı: Univer içine yeni bir workbook nesnesini güvenli şekilde yükle (Çift yüklemeyi ve donmayı önler)
+  // Yardımcı: Univer içine yeni bir workbook nesnesini güvenli şekilde yükle (Bellek referansı paylaşımını önlemek için ayrı derin kopya kullanır!)
   const lastMountedRef = useRef<any>(null);
   const mountWorkbookIntoUniver = (wbToLoad: UniverWorkbookData) => {
     const api = univerAPIRef.current;
@@ -392,8 +449,11 @@ export default function UniverSpreadsheet({
         }
       }
 
+      // ÖNEMLİ: Univer'in kendi iç matrisi ile currentWorkbookDataRef'in aynı nesne referansını paylaşmaması için
+      // createWorkbook'a bağımsız bir derin kopya (deep clone) veriyoruz!
+      const engineClone = JSON.parse(JSON.stringify(cleanClone));
       api.createWorkbook({
-        ...cleanClone,
+        ...engineClone,
         id: newUnitId,
       });
     } catch (err) {
@@ -493,8 +553,9 @@ export default function UniverSpreadsheet({
 
       const uniqueId = `wb_unit_${Date.now()}`;
       currentUnitIdRef.current = uniqueId;
+      const initialEngineClone = JSON.parse(JSON.stringify(initialData));
       univerAPI.createWorkbook({
-        ...initialData,
+        ...initialEngineClone,
         id: uniqueId,
       } as any);
 
@@ -517,7 +578,9 @@ export default function UniverSpreadsheet({
               const val = range?.getValue?.();
               const formula = (range as any)?.getFormula?.() || range?.getFormulas?.()?.[0]?.[0];
 
-              cellCacheRef.current[`${sid}_${r}_${c}`] = { v: val, f: formula || undefined };
+              if (val !== undefined || formula !== undefined) {
+                cellCacheRef.current[`${sid}_${r}_${c}`] = { v: val, f: formula || undefined };
+              }
 
               onSelectionChangeRef.current?.({
                 sheetId: sid,
@@ -534,7 +597,25 @@ export default function UniverSpreadsheet({
           }
         }
 
-        if (id.includes('set-range-values') && command?.params?.cellValue) {
+        // Birleştirme, sütun genişliği, satır yüksekliği, satır/sütun ekleme-silme gibi araç çubuğu işlemlerinde de tam görüntüyü senkronize et
+        if (
+          id.includes('merge') ||
+          id.includes('col-width') ||
+          id.includes('row-height') ||
+          id.includes('worksheet-name') ||
+          id.includes('tab-color') ||
+          id.includes('frozen') ||
+          id.includes('insert-sheet') ||
+          id.includes('remove-sheet') ||
+          id.includes('insert-row') ||
+          id.includes('insert-col') ||
+          id.includes('remove-row') ||
+          id.includes('remove-col')
+        ) {
+          syncLiveSnapshotFromUniver();
+        }
+
+        if (id === 'sheet.mutation.set-range-values' && command?.params?.cellValue) {
           try {
             const cellValueMatrix = command.params.cellValue;
             const activeWb = univerAPI.getActiveWorkbook();
@@ -543,6 +624,8 @@ export default function UniverSpreadsheet({
               command.params.subUnitId ||
               activeSheet?.getSheetId() ||
               'sheet_1';
+            const targetSheet =
+              activeWb?.getSheetBySheetId(subUnitId) || activeSheet;
 
             Object.keys(cellValueMatrix).forEach((rKey) => {
               const r = Number(rKey);
@@ -555,12 +638,64 @@ export default function UniverSpreadsheet({
                   const cacheKey = `${subUnitId}_${r}_${c}`;
                   const prev = cellCacheRef.current[cacheKey];
 
+                  // ÖNEMLİ: Kalın (Bold), Üstü Çizili (Strikethrough), Kenarlık (Border), Biçim Boyacısı (Format Painter),
+                  // Yazı Rengi, Dolgu Rengi, Hizalama gibi araç çubuğu işlemleri cell nesnesi içinde SADECE { s: ... } gönderir
+                  // ve cell.v === undefined olur! Bu durumda mevcut hücre değerini ASLA undefined ile ezmemeliyiz!
+                  const hasValueOrFormulaProp =
+                    'v' in cell || 'f' in cell || 'p' in cell;
+                  const isClearCellAction =
+                    Object.keys(cell).length === 0 ||
+                    (cell.v === null && cell.f === null);
+                  const isStyleOnlyChange =
+                    !hasValueOrFormulaProp && !isClearCellAction;
+
+                  // Canlı hücreden güncel değeri ve formülü oku
+                  let liveVal: any = undefined;
+                  let liveFormula: string | undefined = undefined;
+                  try {
+                    if (targetSheet) {
+                      const rng = targetSheet.getRange(r, c, 1, 1);
+                      liveVal = rng?.getValue?.();
+                      liveFormula =
+                        (rng as any)?.getFormula?.() ||
+                        rng?.getFormulas?.()?.[0]?.[0];
+                    }
+                  } catch (e) {
+                    // ignore
+                  }
+
+                  // Eğer zengin metin (rich text p.body.dataStream) varsa metni oradan da kurtar
+                  const richTextVal =
+                    cell?.p?.body?.dataStream !== undefined
+                      ? String(cell.p.body.dataStream).replace(/\r\n$/, '').replace(/\n$/, '')
+                      : undefined;
+
+                  const effectiveValue = isStyleOnlyChange
+                    ? liveVal !== undefined
+                      ? liveVal
+                      : prev?.v
+                    : isClearCellAction
+                    ? ''
+                    : cell.v !== undefined && cell.v !== null
+                    ? cell.v
+                    : richTextVal !== undefined
+                    ? richTextVal
+                    : liveVal !== undefined
+                    ? liveVal
+                    : prev?.v ?? '';
+
+                  const effectiveFormula = isStyleOnlyChange
+                    ? liveFormula || prev?.f || undefined
+                    : isClearCellAction
+                    ? undefined
+                    : cell.f || liveFormula || undefined;
+
                   const allowed = onCellEditedRef.current?.({
                     sheetId: subUnitId,
                     row: r,
                     col: c,
-                    value: cell.v,
-                    formula: cell.f,
+                    value: effectiveValue,
+                    formula: effectiveFormula,
                     previousValue: prev?.v,
                     previousFormula: prev?.f,
                   });
@@ -568,30 +703,40 @@ export default function UniverSpreadsheet({
                   // Hücre kilitliyse eski değerine geri al
                   if (allowed === false) {
                     isApplyingRemoteRef.current = true;
-                    const targetSheet =
-                      activeWb?.getSheetBySheetId(subUnitId) || activeSheet;
                     if (targetSheet) {
                       const rng = targetSheet.getRange(r, c, 1, 1);
                       if (prev?.f) {
                         rng.setValue(prev.f);
-                      } else {
-                        rng.setValue(prev?.v !== undefined ? prev.v : '');
+                      } else if (prev?.v !== undefined) {
+                        rng.setValue(prev.v);
                       }
                     }
                     setTimeout(() => {
                       isApplyingRemoteRef.current = false;
                     }, 60);
                   } else {
-                    cellCacheRef.current[cacheKey] = {
-                      v: cell.v,
-                      f: cell.f,
-                    };
-                    // Bellekteki tam Workbook nesnesini de anında güncelle!
-                    syncCellIntoMemoryWorkbook(subUnitId, r, c, cell.v, cell.f);
+                    if (effectiveValue !== undefined || effectiveFormula !== undefined) {
+                      cellCacheRef.current[cacheKey] = {
+                        v: effectiveValue,
+                        f: effectiveFormula,
+                      };
+                    }
+                    // Bellekteki Workbook nesnesini mevcut değeri silmeden güncelle
+                    syncCellIntoMemoryWorkbook(
+                      subUnitId,
+                      r,
+                      c,
+                      isStyleOnlyChange ? undefined : effectiveValue,
+                      isStyleOnlyChange ? undefined : effectiveFormula,
+                      cell.s
+                    );
                   }
                 }
               });
             });
+
+            // Tüm stil tablosunu (styles, kenarlıklar, kalın, üstü çizili, biçim boyacısı vb.) Univer motorundan tam senkronize et
+            syncLiveSnapshotFromUniver();
           } catch (err) {
             // ignore
           }
@@ -600,12 +745,13 @@ export default function UniverSpreadsheet({
 
       const handle: UniverSpreadsheetHandle = {
         getCurrentSnapshot: () => {
-          return JSON.parse(JSON.stringify(currentWorkbookDataRef.current));
+          return syncLiveSnapshotFromUniver();
         },
         loadWorkbookSnapshot: (wb: UniverWorkbookData) => {
           mountWorkbookIntoUniver(wb);
         },
         applyRemoteCellUpdate: (sheetId, row, col, value, formula) => {
+          if (value === undefined && !formula) return;
           try {
             isApplyingRemoteRef.current = true;
             cellCacheRef.current[`${sheetId}_${row}_${col}`] = {
@@ -620,7 +766,7 @@ export default function UniverSpreadsheet({
               const range = sheet.getRange(row, col, 1, 1);
               if (formula) {
                 range.setValue(formula);
-              } else {
+              } else if (value !== undefined) {
                 range.setValue(value);
               }
             }

@@ -221,7 +221,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           existing.version = (existing.version || 1) + 1;
           existing.updatedAt = new Date().toISOString();
 
-          // Eğer tam güncel workbookData gönderildiyse doğrudan onu kaydet, yoksa ilgili hücreyi yama
+          // Eğer tam güncel workbookData gönderildiyse doğrudan onu kaydet, yoksa ilgili hücreyi mevcut değeri silmeden yama
           if (body.workbookData && body.workbookData.sheets) {
             existing.workbookData = body.workbookData;
           } else if (
@@ -233,23 +233,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             targetSheet.cellData = targetSheet.cellData || {};
             targetSheet.cellData[row] = targetSheet.cellData[row] || {};
             const oldCell = targetSheet.cellData[row][col];
+            const nextVal = value !== undefined ? value : oldCell?.v;
 
             targetSheet.cellData[row][col] = {
               ...(oldCell || {}),
-              v: value,
-              t: typeof value === 'number' ? 2 : 1,
-              f: formula || undefined,
+              ...(nextVal !== undefined
+                ? {
+                    v: nextVal,
+                    t: typeof nextVal === 'number' ? 2 : 1,
+                  }
+                : {}),
+              f: formula !== undefined ? formula || undefined : oldCell?.f,
             };
           }
 
           // Bu odanın kendi versiyon geçmişine (snapshots) hücre düzenleme kaydını ekle
           const snapId = body.snapshotId || `snap_edit_${Date.now()}`;
+          const displaySummary =
+            formula ||
+            (value !== undefined && value !== '' ? String(value) : 'Biçimlendirildi');
           if (existing.workbookData) {
             existing.snapshots = existing.snapshots || [];
             existing.snapshots.unshift({
               id: snapId,
               roomCode: cleanCode,
-              label: `${cellRef || `R${row + 1}C${col + 1}`} düzenlendi (${formula || value})`,
+              label: `${cellRef || `R${row + 1}C${col + 1}`} düzenlendi (${displaySummary})`,
               createdBy: senderName,
               createdAt: new Date().toISOString(),
               rowCount: existing.stats?.totalRows || 10,
@@ -272,7 +280,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             action: `${cellRef || `R${row + 1}C${col + 1}`} hücresini güncelledi`,
             cellRef,
             sheetName,
-            newValue: formula || value,
+            newValue: displaySummary,
             timestamp: Date.now(),
             snapshotId: snapId,
           });
@@ -280,20 +288,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             existing.auditLog = existing.auditLog.slice(0, 100);
           }
 
-          existing.recentCellDeltas = existing.recentCellDeltas || [];
-          existing.recentCellDeltas.push({
-            version: existing.version,
-            senderId,
-            senderName,
-            sheetId,
-            row,
-            col,
-            value,
-            formula,
-            timestamp: Date.now(),
-          });
-          if (existing.recentCellDeltas.length > 200) {
-            existing.recentCellDeltas = existing.recentCellDeltas.slice(-200);
+          if (value !== undefined || formula !== undefined) {
+            existing.recentCellDeltas = existing.recentCellDeltas || [];
+            existing.recentCellDeltas.push({
+              version: existing.version,
+              senderId,
+              senderName,
+              sheetId,
+              row,
+              col,
+              value,
+              formula,
+              timestamp: Date.now(),
+            });
+            if (existing.recentCellDeltas.length > 200) {
+              existing.recentCellDeltas = existing.recentCellDeltas.slice(-200);
+            }
           }
         }
 
