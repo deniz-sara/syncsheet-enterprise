@@ -2451,28 +2451,28 @@ for (let r = 1; r <= 5; r++) {
   };
 
   // EXCEL COPILOT: Doğal dil komutundan canlı formül ve önizleme üretimi
-  const copilotSuggestions = useMemo(
-    () => getCopilotSmartSuggestions(workbookData, activeSelection.sheetId),
-    [workbookData, activeSelection.sheetId]
-  );
+  const copilotSuggestions = useMemo(() => {
+    const liveWb = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+    return getCopilotSmartSuggestions(liveWb, activeSelection.sheetId);
+  }, [workbookData, activeSelection.sheetId, activeSelection.row, activeSelection.col, stats.lastSavedTime]);
 
   const copilotResult: CopilotResult = useMemo(() => {
-    const effectivePrompt =
-      copilotPrompt.trim() || copilotSuggestions[0]?.prompt || 'B sütunundaki değerleri topla';
+    const liveWb = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+    const effectivePrompt = copilotPrompt.trim() || 'A1 ile B1 hücresini topla';
     return generateCopilotSolution(
       effectivePrompt,
-      workbookData,
+      liveWb,
       activeSelection.row,
       activeSelection.col,
       activeSelection.sheetId
     );
   }, [
     copilotPrompt,
-    copilotSuggestions,
     workbookData,
     activeSelection.row,
     activeSelection.col,
     activeSelection.sheetId,
+    stats.lastSavedTime,
   ]);
 
   const handleApplyCopilotToCell = () => {
@@ -3478,13 +3478,13 @@ for (let r = 1; r <= 5; r++) {
             }
             className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold shadow-xs transition cursor-pointer ${
               activeDrawer === 'copilot'
-                ? 'bg-purple-700 text-white ring-2 ring-purple-300'
-                : 'bg-linear-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white'
+                ? 'bg-purple-800 text-white ring-2 ring-purple-300'
+                : 'bg-purple-600 hover:bg-purple-700 text-white'
             }`}
             title="Formül yazmak yerine ne yapmak istediğinizi Türkçe söyleyin, Excel Copilot formülü otomatik oluştursun ve uygulasın"
           >
             <Sparkles className="w-4 h-4 text-amber-300" />
-            <span>Excel Copilot (Akıllı Formül Asistanı)</span>
+            <span>Excel Copilot (AI Formül Asistanı)</span>
           </button>
 
           {/* FX FONKSİYON SİHİRBAZI BUTONU */}
@@ -3973,113 +3973,82 @@ for (let r = 1; r <= 5; r++) {
         {/* SAĞ YAN PANEL 0: ✨ EXCEL COPILOT (DOĞAL DİL FORMÜL & TABLO ASİSTANI) */}
         {activeDrawer === 'copilot' && (
           <aside className="w-[410px] bg-white border-l border-slate-200 flex flex-col h-full z-20 shrink-0 shadow-2xl">
-            <div className="p-4 border-b border-purple-100 flex items-center justify-between bg-linear-to-r from-purple-700 to-indigo-700 text-white">
+            <div className="p-4 border-b border-purple-800 flex items-center justify-between bg-purple-700 text-white">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-white/15 flex items-center justify-center">
+                <div className="w-8 h-8 rounded-xl bg-purple-800 flex items-center justify-center">
                   <Sparkles className="w-4 h-4 text-amber-300" />
                 </div>
                 <div>
                   <h3 className="text-sm font-bold flex items-center gap-1.5">
                     <span>Ortak Excel Copilot</span>
-                    <span className="px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 text-[9px] font-extrabold uppercase">
+                    <span className="px-1.5 py-0.5 rounded bg-amber-400 text-slate-950 text-[9px] font-extrabold uppercase">
                       AI Asistan
                     </span>
                   </h3>
                   <p className="text-[11px] text-purple-100">
-                    Formül bilmenize gerek yok; ne istediğinizi Türkçe yazın
+                    Formül yazmak yerine ne hesaplamak istediğinizi yazın
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setActiveDrawer('none')}
-                className="text-purple-200 hover:text-white p-1 rounded-lg hover:bg-white/10 cursor-pointer"
+                className="text-purple-200 hover:text-white p-1 rounded-lg hover:bg-purple-800 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <div className="p-4 space-y-4 overflow-y-auto flex-1 text-xs">
-              {/* Seçili Hücre ve Algılanan Sütunlar */}
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-700">Seçili Hedef Hücre:</span>
-                  <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-900 font-mono font-extrabold">
-                    {activeSelection.cellRef}
-                  </span>
-                </div>
-                {(() => {
-                  const { columns } = inspectActiveSheetColumns(
-                    workbookData,
-                    activeSelection.sheetId
-                  );
-                  if (columns.length === 0) return null;
-                  return (
-                    <div>
-                      <div className="text-[10px] font-semibold text-slate-400 uppercase mb-1">
-                        Tablodaki Sütunlarınız:
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {columns.map((c) => (
-                          <span
-                            key={c.colIndex}
-                            className="px-2 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-medium text-slate-700"
-                          >
-                            <strong className="font-mono text-purple-700">{c.colLetter}:</strong>{' '}
-                            {c.header}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })()}
+              {/* Seçili Hücre Bilgisi */}
+              <div className="p-3 rounded-xl bg-purple-50 border border-purple-200 flex items-center justify-between">
+                <span className="font-bold text-purple-950">
+                  Formülün Yazılacağı Seçili Hücre:
+                </span>
+                <span className="px-2.5 py-0.5 rounded-lg bg-purple-700 text-white font-mono font-extrabold text-xs">
+                  {activeSelection.cellRef}
+                </span>
               </div>
 
               {/* Doğal Dil Giriş Kutusu */}
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <label className="block font-bold text-slate-800">
-                  Ne Hesaplamak İstiyorsunuz? (Türkçe Yazın)
+                  Ne Hesaplamak İstiyorsunuz?
                 </label>
                 <textarea
                   value={copilotPrompt}
                   onChange={(e) => setCopilotPrompt(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (copilotPrompt.trim()) {
+                        handleApplyCopilotToCell();
+                      }
+                    }
+                  }}
                   rows={3}
-                  placeholder="Örn: B sütunundaki değerlerin toplamını al&#10;Örn: B sütunu ile C sütununu çarp tüm satırlara uygula&#10;Örn: C2 10000'den büyükse Onaylı değilse Beklemede yaz"
+                  placeholder="Örn: A1 ile B1 hücresini topla&#10;Örn: A1 ile B1'i çarp&#10;Örn: A1:A10 aralığının ortalamasını al"
                   className="w-full bg-white border-2 border-purple-300 focus:border-purple-600 focus:outline-none rounded-xl p-3 text-xs text-slate-900 leading-relaxed"
                 />
-              </div>
-
-              {/* Tek Tıkla Akıllı Öneriler */}
-              <div>
-                <div className="text-[11px] font-bold text-slate-600 mb-1.5 flex items-center gap-1">
-                  <Sparkles className="w-3.5 h-3.5 text-purple-600" />
-                  <span>Tablonuza Özel Tek Tıkla Hazır Komutlar:</span>
-                </div>
-                <div className="grid grid-cols-1 gap-1.5">
-                  {copilotSuggestions.map((sug, i) => (
+                <div className="flex items-center justify-between text-[11px] text-slate-500">
+                  <span>Yazdığınız anda formül aşağıda canlı üretilir.</span>
+                  {copilotPrompt.trim() && (
                     <button
-                      key={i}
                       type="button"
-                      onClick={() => setCopilotPrompt(sug.prompt)}
-                      className={`p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition cursor-pointer ${
-                        copilotPrompt === sug.prompt
-                          ? 'bg-purple-50 border-purple-400 text-purple-950 font-bold'
-                          : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-700'
-                      }`}
+                      onClick={() => setCopilotPrompt('')}
+                      className="text-rose-600 hover:underline font-semibold cursor-pointer"
                     >
-                      <span className="truncate">{sug.label}</span>
-                      <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[9px] font-extrabold shrink-0">
-                        {sug.badge}
-                      </span>
+                      Temizle
                     </button>
-                  ))}
+                  )}
                 </div>
               </div>
 
-              {/* Canlı Copilot Çözüm & Formül Önizleme Kartı */}
-              <div className="p-4 rounded-2xl bg-slate-900 text-white space-y-3 shadow-lg">
+              {/* Canlı Copilot Çözüm & Formül Önizleme Kartı (DOĞRUDAN YAZI KUTUSUNUN ALTINDA!) */}
+              <div className="p-4 rounded-2xl bg-slate-900 text-white space-y-3 shadow-lg border border-purple-500/30">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-purple-300">
-                    ✨ Copilot Tarafından Üretilen Çözüm
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-300 flex items-center gap-1">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Üretilen Excel Formülü & Sonuç</span>
                   </span>
                   <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold">
                     Hedef: {activeSelection.cellRef}
@@ -4095,14 +4064,14 @@ for (let r = 1; r <= 5; r++) {
 
                 <div className="bg-slate-800 border border-slate-700 rounded-xl p-3 flex items-center justify-between gap-2">
                   <div className="min-w-0">
-                    <div className="text-[10px] text-slate-400">Oluşturulan Excel Formülü</div>
+                    <div className="text-[10px] text-slate-400">Excel Formülü</div>
                     <div className="font-mono text-sm font-extrabold text-emerald-400 break-all mt-0.5">
                       {copilotResult.formula}
                     </div>
                   </div>
                   <div className="text-right shrink-0 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-700">
-                    <div className="text-[10px] text-slate-400">Önizleme Sonucu</div>
-                    <div className="font-mono text-xs font-bold text-white">
+                    <div className="text-[10px] text-slate-400">Hesaplanan Sonuç</div>
+                    <div className="font-mono text-sm font-bold text-white">
                       {typeof copilotResult.computedPreview === 'number'
                         ? copilotResult.computedPreview.toLocaleString('tr-TR')
                         : String(copilotResult.computedPreview)}
@@ -4112,37 +4081,56 @@ for (let r = 1; r <= 5; r++) {
 
                 <div className="space-y-2 pt-1">
                   <button
+                    type="button"
                     onClick={handleApplyCopilotToCell}
                     className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-sm cursor-pointer transition flex items-center justify-center gap-1.5"
                   >
                     <Check className="w-4 h-4" />
                     <span>
-                      Seçili Hücreye ({activeSelection.cellRef}) Formülü Uygula
+                      Formülü {activeSelection.cellRef} Hücresine Yaz ve Uygula (Enter)
                     </span>
                   </button>
 
                   {copilotResult.canApplyToColumn && copilotResult.columnWrites && (
                     <div className="pt-2 border-t border-slate-800 space-y-2">
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={copilotCustomHeader}
-                          onChange={(e) => setCopilotCustomHeader(e.target.value)}
-                          placeholder={`Yeni Sütun Başlığı (${copilotResult.columnHeaderSuggestion || 'Sonuç'})`}
-                          className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder:text-slate-400"
-                        />
-                      </div>
                       <button
+                        type="button"
                         onClick={handleApplyCopilotToColumn}
-                        className="w-full py-2.5 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-sm cursor-pointer transition flex items-center justify-center gap-1.5"
+                        className="w-full py-2 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-sm cursor-pointer transition flex items-center justify-center gap-1.5"
                       >
-                        <Sparkles className="w-4 h-4 text-amber-300" />
+                        <Sparkles className="w-3.5 h-3.5 text-amber-300" />
                         <span>
-                          Tüm Satırlara Yeni Sütun Olarak Uygula ({copilotResult.columnWrites.length} Satır)
+                          Tüm Satırlara Uygula ({copilotResult.columnWrites.length} Satır)
                         </span>
                       </button>
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* Hızlı Örnek Komut Şablonları */}
+              <div className="pt-2 border-t border-slate-200">
+                <div className="text-[11px] font-bold text-slate-500 mb-2">
+                  Örnek Komut Şablonları (Tıklayıp düzenleyebilirsiniz):
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {copilotSuggestions.map((sug, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setCopilotPrompt(sug.prompt)}
+                      className={`p-2 rounded-xl border text-left flex items-center justify-between gap-2 transition cursor-pointer ${
+                        copilotPrompt === sug.prompt
+                          ? 'bg-purple-50 border-purple-400 text-purple-950 font-bold'
+                          : 'bg-slate-50 hover:bg-white border-slate-200 text-slate-700'
+                      }`}
+                    >
+                      <span className="truncate text-[11px]">{sug.label}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[9px] font-extrabold shrink-0">
+                        {sug.badge}
+                      </span>
+                    </button>
+                  ))}
                 </div>
               </div>
             </div>

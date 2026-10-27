@@ -619,14 +619,7 @@ export function getBlankWorkbook(indexNum: number): UniverWorkbookData {
     name: `Yeni_Calisma_Kitabi_${indexNum}`,
     appVersion: '1.0.0',
     locale: 'enUS',
-    styles: {
-      header_style: {
-        bl: 1,
-        bg: { rgb: '#f1f5f9' },
-        cl: { rgb: '#0f172a' },
-        fs: 11,
-      },
-    },
+    styles: {},
     sheetOrder: [sheetId],
     sheets: {
       [sheetId]: {
@@ -637,13 +630,7 @@ export function getBlankWorkbook(indexNum: number): UniverWorkbookData {
         columnCount: 26,
         defaultColumnWidth: 130,
         defaultRowHeight: 25,
-        cellData: {
-          0: {
-            0: { v: 'BAŞLIK 1', t: 1, s: 'header_style' },
-            1: { v: 'BAŞLIK 2', t: 1, s: 'header_style' },
-            2: { v: 'TUTAR', t: 1, s: 'header_style' },
-          },
-        },
+        cellData: {},
       },
     },
   };
