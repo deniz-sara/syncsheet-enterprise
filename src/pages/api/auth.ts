@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import {
+  dbDeleteRoom,
   dbGetAllRoomsMap,
   dbGetUser,
   dbUpsertUser,
@@ -17,10 +18,10 @@ export interface UserSavedRoomEntry {
 
 export interface StoredUserRecord {
   id: string;
-  username: string;
+  username: string; // E-posta adresi (küçük harf normalize edilmiş benzersiz anahtar)
   password: string;
-  name: string;
-  email: string;
+  name: string; // Ad Soyad (Görünür isim)
+  email: string; // E-posta adresi
   department: string;
   color: string;
   createdAt: string;
@@ -46,11 +47,17 @@ function pickColor(str: string): string {
   return USER_COLORS[Math.abs(hash) % USER_COLORS.length];
 }
 
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 async function enrichUserRooms(user: StoredUserRecord): Promise<UserSavedRoomEntry[]> {
   const roomsDb = await dbGetAllRoomsMap();
   const list = Array.isArray(user.savedRooms) ? user.savedRooms : [];
 
+  // Sadece veritabanında gerçekten var olan odaları döndür (silinen odalar çöplük yaratmasın)
   return list
+    .filter((entry) => Boolean(entry?.roomCode && roomsDb[entry.roomCode]))
     .map((entry) => {
       const liveRoom = roomsDb[entry.roomCode];
       return {
@@ -72,28 +79,37 @@ async function enrichUserRooms(user: StoredUserRecord): Promise<UserSavedRoomEnt
 }
 
 async function sanitizeUserForClient(user: StoredUserRecord) {
+  const cleanEmail = (user.email || user.username || '').trim().toLowerCase();
+  const enrichedRooms = await enrichUserRooms(user);
+
+  // Eğer silinmiş odalar varsa kullanıcının kaydını da temiz tut
+  if (Array.isArray(user.savedRooms) && enrichedRooms.length !== user.savedRooms.length) {
+    user.savedRooms = enrichedRooms;
+    await dbUpsertUser(user);
+  }
+
   return {
     id: user.id,
-    username: user.username,
+    username: cleanEmail,
     name: user.name,
-    email: user.email,
+    email: cleanEmail,
     department: user.department,
     color: user.color,
     role: 'editor' as const,
-    savedRooms: await enrichUserRooms(user),
+    savedRooms: enrichedRooms,
     storageEngine: isSupabaseConfigured() ? 'supabase' : 'local',
   };
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET') {
-    const username = String(req.query.username || '')
+    const emailKey = String(req.query.email || req.query.username || '')
       .trim()
       .toLowerCase();
-    if (!username) {
+    if (!emailKey) {
       return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     }
-    const existing = await dbGetUser(username);
+    const existing = await dbGetUser(emailKey);
     if (!existing) {
       return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     }
@@ -103,50 +119,48 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (req.method === 'POST') {
     const { action } = req.body || {};
 
-    // 1) YENİ KULLANICI KAYDI (REGISTER)
+    // 1) YENİ KULLANICI KAYDI (REGISTER) - E-Posta + Ad Soyad Zorunlu, Tekil E-Posta Kontrolü
     if (action === 'REGISTER') {
-      const rawUsername = String(req.body.username || '')
+      const rawEmail = String(req.body.email || req.body.username || '')
         .trim()
         .toLowerCase();
       const password = String(req.body.password || '').trim();
-      const name = String(req.body.name || '').trim() || rawUsername;
-      const department = String(req.body.department || '').trim() || 'Genel Müdürlük';
+      const name = String(req.body.name || '').trim();
+      const department = String(req.body.department || '').trim() || 'Genel';
 
-      if (!rawUsername || rawUsername.length < 3) {
+      if (!rawEmail || !isValidEmail(rawEmail)) {
         return res
           .status(400)
-          .json({ error: 'Kullanıcı adı en az 3 karakter olmalıdır.' });
+          .json({ error: 'Lütfen geçerli bir e-posta adresi girin (örn: ad.soyad@sirket.com).' });
+      }
+      if (!name || name.length < 2) {
+        return res
+          .status(400)
+          .json({ error: 'Lütfen Ad Soyad bilginizi eksiksiz girin.' });
       }
       if (!password || password.length < 3) {
         return res.status(400).json({ error: 'Şifre en az 3 karakter olmalıdır.' });
       }
 
-      const existing = await dbGetUser(rawUsername);
+      const existing = await dbGetUser(rawEmail);
       if (existing) {
         return res.status(409).json({
-          error: 'Bu kullanıcı adı zaten kayıtlı. Lütfen giriş yapın veya farklı bir kullanıcı adı seçin.',
+          error:
+            'Bu e-posta adresi ile kayıtlı bir kullanıcı zaten mevcut. Aynı e-posta adresi ile ikinci bir hesap oluşturulamaz.',
         });
       }
 
       const nowIso = new Date().toISOString();
       const newUser: StoredUserRecord = {
-        id: `usr_${rawUsername.replace(/[^a-z0-9]/g, '_')}`,
-        username: rawUsername,
+        id: `usr_${rawEmail.replace(/[^a-z0-9]/g, '_')}`,
+        username: rawEmail,
+        email: rawEmail,
         password,
         name,
-        email: `${rawUsername}@kurumsal.local`,
         department,
-        color: pickColor(rawUsername),
+        color: pickColor(rawEmail),
         createdAt: nowIso,
-        savedRooms: [
-          {
-            roomCode: 'XLS-849-201',
-            title: '2026_Kurumsal_Butce_Plani',
-            pin: '',
-            role: 'owner',
-            lastAccessedAt: nowIso,
-          },
-        ],
+        savedRooms: [], // Varsayılan (default) hiçbir oda eklenmez!
       };
 
       await dbUpsertUser(newUser);
@@ -157,17 +171,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    // 2) KULLANICI GİRİŞİ (LOGIN)
+    // 2) KULLANICI GİRİŞİ (LOGIN) - E-Posta Adresi ve Şifre ile
     if (action === 'LOGIN') {
-      const rawUsername = String(req.body.username || '')
+      const rawEmail = String(req.body.email || req.body.username || '')
         .trim()
         .toLowerCase();
       const password = String(req.body.password || '').trim();
 
-      const existing = await dbGetUser(rawUsername);
+      if (!rawEmail) {
+        return res.status(400).json({ error: 'Lütfen e-posta adresinizi girin.' });
+      }
+
+      const existing = await dbGetUser(rawEmail);
       if (!existing) {
         return res.status(404).json({
-          error: 'Bu kullanıcı adına ait hesap bulunamadı. "Hesap Oluştur (Kayıt Ol)" sekmesinden hemen oluşturabilirsiniz.',
+          error:
+            'Bu e-posta adresine ait hesap bulunamadı. "Kayıt Ol" sekmesinden yeni hesap oluşturabilirsiniz.',
         });
       }
       if (existing.password !== password) {
@@ -182,7 +201,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 3) KULLANICININ GİRDİĞİ VEYA OLUŞTURDUĞU ODAYI + PIN'İ GEÇMİŞİNE KAYDET (UPSERT_USER_ROOM)
     if (action === 'UPSERT_USER_ROOM') {
-      const rawUsername = String(req.body.username || '')
+      const rawEmail = String(req.body.email || req.body.username || '')
         .trim()
         .toLowerCase();
       const roomCode = String(req.body.roomCode || '')
@@ -192,11 +211,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const pin = req.body.pin !== undefined ? String(req.body.pin) : undefined;
       const role = (req.body.role as 'owner' | 'editor' | 'viewer') || 'editor';
 
-      if (!rawUsername || !roomCode) {
+      if (!rawEmail || !roomCode) {
         return res.status(400).json({ error: 'Eksik kullanıcı veya oda bilgisi.' });
       }
 
-      const user = await dbGetUser(rawUsername);
+      const user = await dbGetUser(rawEmail);
       if (!user) {
         return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
       }
@@ -234,25 +253,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    // 4) KULLANICININ ODA GEÇMİŞİNDEN BİR ODAYI KALDIR (REMOVE_USER_ROOM)
+    // 4) ODAYI SİL / KALDIR — Veritabanından da (Supabase & Local) Kalıcı Olarak Siler!
     if (action === 'REMOVE_USER_ROOM') {
-      const rawUsername = String(req.body.username || '')
+      const rawEmail = String(req.body.email || req.body.username || '')
         .trim()
         .toLowerCase();
       const roomCode = String(req.body.roomCode || '')
         .trim()
         .toUpperCase();
 
-      if (!rawUsername) {
+      if (!rawEmail) {
         return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
       }
 
-      const user = await dbGetUser(rawUsername);
+      const user = await dbGetUser(rawEmail);
       if (!user) {
         return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
       }
 
       user.savedRooms = (user.savedRooms || []).filter((r: any) => r.roomCode !== roomCode);
+
+      // Odayı veritabanından da (syncsheet_rooms ve .data/rooms.json) kalıcı olarak sil
+      if (roomCode) {
+        await dbDeleteRoom(roomCode);
+      }
+
       await dbUpsertUser(user);
 
       return res.status(200).json({

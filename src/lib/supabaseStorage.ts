@@ -90,11 +90,11 @@ function buildHeaders(key: string, extra?: Record<string, string>): Record<strin
 }
 
 // ============================================================================
-// KULLANICI VERİTABANI İŞLEMLERİ (syncsheet_users)
+// KULLANICI VERİTABANI İŞLEMLERİ (syncsheet_users - E-posta Bazlı Tekil Kayıt)
 // ============================================================================
 
-export async function dbGetUser(username: string): Promise<any | null> {
-  const clean = username.trim().toLowerCase();
+export async function dbGetUser(emailOrKey: string): Promise<any | null> {
+  const clean = emailOrKey.trim().toLowerCase();
   if (!clean) return null;
 
   const cfg = getSupabaseConfig();
@@ -121,14 +121,20 @@ export async function dbGetUser(username: string): Promise<any | null> {
 }
 
 export async function dbUpsertUser(user: any): Promise<void> {
-  const clean = String(user?.username || '')
+  const clean = String(user?.email || user?.username || '')
     .trim()
     .toLowerCase();
   if (!clean) return;
 
+  const normalizedUser = {
+    ...user,
+    email: clean,
+    username: clean,
+  };
+
   // Yerel önbelleği güncelle
   const localMap = readLocalUsersMap();
-  localMap[clean] = user;
+  localMap[clean] = normalizedUser;
   writeLocalUsersMap(localMap);
 
   // Supabase'e kalıcı olarak yaz
@@ -144,7 +150,7 @@ export async function dbUpsertUser(user: any): Promise<void> {
         body: JSON.stringify([
           {
             username: clean,
-            data: user,
+            data: normalizedUser,
             updated_at: new Date().toISOString(),
           },
         ]),
@@ -176,6 +182,7 @@ export async function dbGetRoom(roomCode: string): Promise<any | null> {
         if (Array.isArray(rows) && rows.length > 0 && rows[0]?.data) {
           return rows[0].data;
         }
+        return null;
       }
     } catch (err) {
       console.error('Supabase dbGetRoom error:', err);
@@ -187,7 +194,6 @@ export async function dbGetRoom(roomCode: string): Promise<any | null> {
 }
 
 export async function dbGetAllRoomsMap(): Promise<Record<string, any>> {
-  const localMap = readLocalRoomsMap();
   const cfg = getSupabaseConfig();
 
   if (cfg) {
@@ -200,13 +206,14 @@ export async function dbGetAllRoomsMap(): Promise<Record<string, any>> {
       if (res.ok) {
         const rows = await res.json();
         if (Array.isArray(rows)) {
-          const merged: Record<string, any> = { ...localMap };
+          const remoteMap: Record<string, any> = {};
           for (const row of rows) {
             if (row?.room_code && row?.data) {
-              merged[row.room_code] = row.data;
+              remoteMap[row.room_code] = row.data;
             }
           }
-          return merged;
+          writeLocalRoomsMap(remoteMap);
+          return remoteMap;
         }
       }
     } catch (err) {
@@ -214,7 +221,7 @@ export async function dbGetAllRoomsMap(): Promise<Record<string, any>> {
     }
   }
 
-  return localMap;
+  return readLocalRoomsMap();
 }
 
 export async function dbUpsertRoom(room: any): Promise<void> {
@@ -228,7 +235,7 @@ export async function dbUpsertRoom(room: any): Promise<void> {
   localMap[clean] = room;
   writeLocalRoomsMap(localMap);
 
-  // Supabase'e kalıcı olarak yaz (Aşırı büyük stres testi snapshot'larını kırparak hızlı senkronize et)
+  // Supabase'e kalıcı olarak yaz
   const cfg = getSupabaseConfig();
   if (cfg) {
     try {
@@ -240,7 +247,6 @@ export async function dbUpsertRoom(room: any): Promise<void> {
         auditLog: Array.isArray(room.auditLog) ? room.auditLog.slice(0, 50) : [],
         snapshots: Array.isArray(room.snapshots)
           ? room.snapshots.slice(0, 12).map((s: any, idx: number) => {
-              // Çok büyük (>1MB) eski stres testi snapshot'larında sadece meta veriyi tut
               const snapSize = s?.workbookData ? JSON.stringify(s.workbookData).length : 0;
               if (snapSize > 1000000 && idx > 0) {
                 const { workbookData, ...metaOnly } = s;
@@ -267,6 +273,34 @@ export async function dbUpsertRoom(room: any): Promise<void> {
       });
     } catch (err) {
       console.error('Supabase dbUpsertRoom error:', err);
+    }
+  }
+}
+
+export async function dbDeleteRoom(roomCode: string): Promise<void> {
+  const clean = String(roomCode || '')
+    .trim()
+    .toUpperCase();
+  if (!clean) return;
+
+  // 1) Yerel dosya önbelleğinden tamamen sil
+  const localMap = readLocalRoomsMap();
+  if (localMap[clean]) {
+    delete localMap[clean];
+    writeLocalRoomsMap(localMap);
+  }
+
+  // 2) Supabase veritabanından (syncsheet_rooms) kalıcı olarak sil (Çöplük oluşmasını engeller)
+  const cfg = getSupabaseConfig();
+  if (cfg) {
+    try {
+      const endpoint = `${cfg.url}/rest/v1/syncsheet_rooms?room_code=eq.${encodeURIComponent(clean)}`;
+      await fetch(endpoint, {
+        method: 'DELETE',
+        headers: buildHeaders(cfg.key),
+      });
+    } catch (err) {
+      console.error('Supabase dbDeleteRoom error:', err);
     }
   }
 }

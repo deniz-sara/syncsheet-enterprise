@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import {
+  dbDeleteRoom,
   dbGetAllRoomsMap,
   dbGetRoom,
   dbUpsertRoom,
@@ -161,6 +162,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       if (!cleanCode) {
         return res.status(400).json({ error: 'roomCode zorunludur.' });
+      }
+
+      if (actionType === 'DELETE_ROOM') {
+        await dbDeleteRoom(cleanCode);
+        return res.status(200).json({
+          success: true,
+          deletedRoomCode: cleanCode,
+        });
       }
 
       let existing: RoomRecord | null = await dbGetRoom(cleanCode);

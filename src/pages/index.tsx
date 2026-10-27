@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import Head from 'next/head';
 import dynamic from 'next/dynamic';
 import {
   FileSpreadsheet,
@@ -89,6 +90,13 @@ import {
   downloadSampleDesktopExcelForVlookup,
 } from '@/lib/externalExcelBridge';
 
+import {
+  generateCopilotSolution,
+  getCopilotSmartSuggestions,
+  inspectActiveSheetColumns,
+  CopilotResult,
+} from '@/lib/excelCopilot';
+
 import type { UniverSpreadsheetHandle } from '@/components/UniverSpreadsheet';
 
 const UniverSpreadsheet = dynamic(() => import('@/components/UniverSpreadsheet'), {
@@ -147,50 +155,43 @@ interface UserSavedRoomItem {
   updatedAt?: string;
 }
 
-const AUTH_STORAGE_KEY = 'syncsheet_auth_user_v2';
+const AUTH_STORAGE_KEY = 'ortak_excel_auth_user_v3';
 
 export default function SyncSheetApp() {
-  // 1) GERÇEK KULLANICI ADI & ŞİFRE GİRİŞ / KAYIT SİSTEMİ VE KULLANICIYA ÖZEL ODA-PIN GEÇMİŞİ
+  // 1) E-POSTA ADRESİ & ŞİFRE GİRİŞ / KAYIT SİSTEMİ VE ODA SEÇİM EKRANI (LOBBY)
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isInRoomLobby, setIsInRoomLobby] = useState<boolean>(true);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(false);
 
   const [currentUser, setCurrentUser] = useState<{
     id: string;
-    username: string;
-    name: string;
-    email: string;
+    username: string; // E-posta adresi (küçük harf anahtar)
+    name: string; // Ad Soyad (Görünür İsim)
+    email: string; // E-posta adresi
     department: string;
     color: string;
     role: 'editor' | 'viewer';
   }>({
-    id: 'usr_denizsara',
-    username: 'denizsara',
-    name: 'Deniz Sara',
-    email: 'denizsara@kurumsal.local',
-    department: 'Yönetim & Strateji',
+    id: '',
+    username: '',
+    name: '',
+    email: '',
+    department: '',
     color: '#059669',
     role: 'editor',
   });
 
   const [authForm, setAuthForm] = useState({
-    username: '',
+    email: '',
     password: '',
     name: '',
     department: '',
   });
 
-  // Giriş yapan kullanıcının geçmişte girdiği veya oluşturduğu tüm Excel Odaları + PIN'leri
-  const [userSavedRooms, setUserSavedRooms] = useState<UserSavedRoomItem[]>([
-    {
-      roomCode: 'XLS-849-201',
-      title: '2026_Kurumsal_Butce_Plani',
-      pin: '',
-      role: 'owner',
-      lastAccessedAt: new Date().toISOString(),
-    },
-  ]);
+  // Giriş yapan kullanıcının kayıtlı Excel Odaları (Varsayılan hiçbir oda yok!)
+  const [userSavedRooms, setUserSavedRooms] = useState<UserSavedRoomItem[]>([]);
 
   // Yeni Excel Odası Oluşturma Formu State'i
   const [newRoomForm, setNewRoomForm] = useState({
@@ -200,37 +201,18 @@ export default function SyncSheetApp() {
   });
   const [revealedPins, setRevealedPins] = useState<Record<string, boolean>>({});
 
-  // 2) ÇOKLU ÇALIŞMA KİTABI SEKME SİSTEMİ (MULTI-WORKBOOK TABS)
-  const [openWorkbooks, setOpenWorkbooks] = useState<OpenWorkbookTab[]>(() => {
-    const wb1 = getDefaultEnterpriseWorkbook();
-    const wb2 = getSalesCrmWorkbook();
-    return [
-      {
-        id: wb1.id,
-        roomCode: 'XLS-849-201',
-        name: wb1.name,
-        workbookData: wb1,
-        updatedAt: Date.now(),
-      },
-      {
-        id: wb2.id,
-        roomCode: 'XLS-702-418',
-        name: wb2.name,
-        workbookData: wb2,
-        updatedAt: Date.now() - 30000,
-      },
-    ];
-  });
-  const [activeWorkbookTabId, setActiveWorkbookTabId] = useState<string>('wb_default_enterprise');
+  // 2) ÇOKLU ÇALIŞMA KİTABI SEKME SİSTEMİ (Varsayılan açık Excel yok!)
+  const [openWorkbooks, setOpenWorkbooks] = useState<OpenWorkbookTab[]>([]);
+  const [activeWorkbookTabId, setActiveWorkbookTabId] = useState<string>('');
 
   const [workbookData, setWorkbookData] = useState<UniverWorkbookData>(() =>
-    getDefaultEnterpriseWorkbook()
+    getBlankWorkbook(1)
   );
 
-  const [roomCode, setRoomCode] = useState<string>('XLS-849-201');
+  const [roomCode, setRoomCode] = useState<string>('');
   const [roomPin, setRoomPin] = useState<string>('');
   const [defaultRoomRole, setDefaultRoomRole] = useState<'editor' | 'viewer'>('editor');
-  const [protectedColumns, setProtectedColumns] = useState<string[]>(['A']);
+  const [protectedColumns, setProtectedColumns] = useState<string[]>([]);
   const [roomVersion, setRoomVersion] = useState<number>(1);
   const [isRoomOwner, setIsRoomOwner] = useState<boolean>(true);
 
@@ -239,62 +221,37 @@ export default function SyncSheetApp() {
   const [nowTick, setNowTick] = useState<number>(Date.now());
 
   const [stats, setStats] = useState({
-    totalRows: 7,
-    totalCells: 56,
-    sheetCount: 2,
-    compressedKB: 4,
+    totalRows: 0,
+    totalCells: 0,
+    sheetCount: 1,
+    compressedKB: 2,
     lastSavedTime: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
-    lastSyncText: 'Otomatik Kaydedildi',
+    lastSyncText: 'Hazır',
     zeroUploadVerified: true,
   });
 
   const [collaborators, setCollaborators] = useState<Record<string, CollaboratorPresence>>({});
   const [followingUserId, setFollowingUserId] = useState<string | null>(null);
   const [activeSelection, setActiveSelection] = useState({
-    sheetId: 'sheet_budget',
-    sheetName: '2026_Butce_Tablosu',
-    cellRef: 'G2',
-    row: 1,
-    col: 6,
-    value: 1580000 as any,
-    formula: '=SUM(D2:F2)' as string | undefined,
+    sheetId: 'sheet_1',
+    sheetName: 'Sayfa 1',
+    cellRef: 'A1',
+    row: 0,
+    col: 0,
+    value: '' as any,
+    formula: undefined as string | undefined,
   });
 
-  // 3) VERSİYON GEÇMİŞİ VE SON DEĞİŞİKLİKLER (HER ZAMAN EN YENİ EN ÜSTTE VE SADECE AKTİF ODAYA AİT!)
-  const initialTimestampRef = useRef<number>(Date.now() - 120000);
-  const [auditLog, setAuditLog] = useState<AuditEvent[]>([
-    {
-      id: 'init_1',
-      roomCode: 'XLS-849-201',
-      userId: 'usr_deniz',
-      userName: 'Deniz Sara',
-      userEmail: 'deniz.sara@sirket.com.tr',
-      userDepartment: 'Yönetim & Strateji',
-      userColor: '#059669',
-      action: 'Çalışma kitabını başlattı (İlk Versiyon)',
-      timestamp: initialTimestampRef.current,
-      snapshotId: 'snap_initial',
-    },
-  ]);
-
-  const [snapshots, setSnapshots] = useState<SnapshotMeta[]>([
-    {
-      id: 'snap_initial',
-      roomCode: 'XLS-849-201',
-      label: 'İlk Başlangıç Versiyonu (v1)',
-      createdBy: 'Deniz Sara',
-      createdByDepartment: 'Yönetim & Strateji',
-      createdAt: new Date(initialTimestampRef.current).toISOString(),
-      timestamp: initialTimestampRef.current,
-      rowCount: 7,
-    },
-  ]);
-
+  // 3) VERSİYON GEÇMİŞİ VE SON DEĞİŞİKLİKLER (Varsayılan demo kayıt yok!)
+  const [auditLog, setAuditLog] = useState<AuditEvent[]>([]);
+  const [snapshots, setSnapshots] = useState<SnapshotMeta[]>([]);
   const [localSnapshotsMap, setLocalSnapshotsMap] = useState<Record<string, UniverWorkbookData>>(
-    () => ({
-      snap_initial: JSON.parse(JSON.stringify(getDefaultEnterpriseWorkbook())),
-    })
+    {}
   );
+
+  // EXCEL COPILOT (DOĞAL DİL FORMÜL & TABLO ASİSTANI) STATE'İ
+  const [copilotPrompt, setCopilotPrompt] = useState<string>('');
+  const [copilotCustomHeader, setCopilotCustomHeader] = useState<string>('');
 
   // 4) FX FONKSİYON SİHİRBAZI & EN SON KULLANILAN FONKSİYONLAR STATE'İ
   const [recentFormulas, setRecentFormulas] = useState<string[]>([
@@ -338,7 +295,7 @@ export default function SyncSheetApp() {
   const [activeCfRules, setActiveCfRules] = useState<ConditionalRuleItem[]>([]);
 
   const [activeDrawer, setActiveDrawer] = useState<
-    'none' | 'pivot' | 'history' | 'protection' | 'conditional'
+    'none' | 'copilot' | 'pivot' | 'history' | 'protection' | 'conditional'
   >('none');
 
   const [openMenu, setOpenMenu] = useState<'none' | 'file' | 'tools'>('none');
@@ -408,7 +365,7 @@ for (let r = 1; r <= 5; r++) {
   const isHydratedFromStorageRef = useRef<boolean>(false);
   const latestRestoredWorkbookRef = useRef<UniverWorkbookData | null>(null);
 
-  const WORKSPACE_STORAGE_KEY = 'syncsheet_workspace_state_v2';
+  const WORKSPACE_STORAGE_KEY = 'ortak_excel_workspace_v3';
 
   const persistWorkspaceToBrowser = (
     overrideWb?: UniverWorkbookData,
@@ -417,6 +374,8 @@ for (let r = 1; r <= 5; r++) {
     overrideRoomCode?: string
   ) => {
     if (typeof window === 'undefined' || !isHydratedFromStorageRef.current) return;
+    const codeToSave = overrideRoomCode || roomCode;
+    if (!codeToSave) return;
     try {
       const wbToSave = overrideWb || sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
       // Eğer tablo çok büyükse (>2.5MB) tarayıcı localStorage'ını dondurmamak için yalnız sunucuya (Supabase) bırak
@@ -424,7 +383,6 @@ for (let r = 1; r <= 5; r++) {
       if (serializedWb.length > 2500000) return;
 
       const tabIdToSave = overrideActiveTabId || activeWorkbookTabId;
-      const codeToSave = overrideRoomCode || roomCode;
       const tabsToSave = (overrideTabs || openWorkbooks)
         .slice(0, 8)
         .map((t) =>
@@ -530,38 +488,79 @@ for (let r = 1; r <= 5; r++) {
 
   const handleRemoveRoomFromUserHistory = async (roomCodeToRemove: string) => {
     const cleanCode = roomCodeToRemove.trim().toUpperCase();
-    setUserSavedRooms((prev) => prev.filter((r) => r.roomCode !== cleanCode));
-    if (!currentUser.username) return;
-    try {
-      const res = await fetch('/api/auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'REMOVE_USER_ROOM',
-          username: currentUser.username,
-          roomCode: cleanCode,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && Array.isArray(data.savedRooms)) {
-        setUserSavedRooms(data.savedRooms);
+    setUserSavedRooms((prev) => {
+      const next = prev.filter((r) => r.roomCode !== cleanCode);
+      if (typeof window !== 'undefined') {
+        try {
+          const rawAuth = localStorage.getItem(AUTH_STORAGE_KEY);
+          if (rawAuth) {
+            const parsed = JSON.parse(rawAuth);
+            parsed.savedRooms = next;
+            localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(parsed));
+          }
+        } catch (e) {
+          // ignore
+        }
       }
-      showToast(`🗑️ ${cleanCode} odası geçmiş listenizden kaldırıldı.`);
+      return next;
+    });
+    setOpenWorkbooks((prev) => prev.filter((t) => t.roomCode !== cleanCode));
+    setSnapshots((prev) => prev.filter((s) => s.roomCode !== cleanCode));
+    setAuditLog((prev) => prev.filter((a) => a.roomCode !== cleanCode));
+
+    if (roomCode === cleanCode) {
+      setRoomCode('');
+      setIsInRoomLobby(true);
+    }
+
+    const userEmailKey = (currentUser.email || currentUser.username || '').trim().toLowerCase();
+    try {
+      if (userEmailKey) {
+        const res = await fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'REMOVE_USER_ROOM',
+            email: userEmailKey,
+            username: userEmailKey,
+            roomCode: cleanCode,
+          }),
+        });
+        const data = await res.json();
+        if (res.ok && Array.isArray(data.savedRooms)) {
+          setUserSavedRooms(data.savedRooms);
+        }
+      } else {
+        await fetch('/api/rooms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actionType: 'DELETE_ROOM',
+            roomCode: cleanCode,
+          }),
+        });
+      }
+      showToast(`🗑️ ${cleanCode} odası veritabanından kalıcı olarak silindi.`);
     } catch (e) {
       // ignore
     }
   };
 
-  // KULLANICI GİRİŞ YAP / KAYIT OL İŞLEMİ
+  // KULLANICI GİRİŞ YAP / KAYIT OL İŞLEMİ (E-POSTA ADRESİ + AD SOYAD + ŞİFRE)
   const handleAuthSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthError(null);
 
-    const cleanUsername = authForm.username.trim().toLowerCase();
+    const cleanEmail = authForm.email.trim().toLowerCase();
     const cleanPassword = authForm.password.trim();
+    const cleanName = authForm.name.trim();
 
-    if (!cleanUsername || cleanUsername.length < 3) {
-      setAuthError('Lütfen en az 3 karakterli bir kullanıcı adı girin.');
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setAuthError('Lütfen geçerli bir e-posta adresi girin (örn: ad.soyad@sirket.com).');
+      return;
+    }
+    if (authMode === 'register' && cleanName.length < 2) {
+      setAuthError('Lütfen Ad Soyad bilginizi eksiksiz girin.');
       return;
     }
     if (!cleanPassword || cleanPassword.length < 3) {
@@ -576,10 +575,11 @@ for (let r = 1; r <= 5; r++) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: authMode === 'register' ? 'REGISTER' : 'LOGIN',
-          username: cleanUsername,
+          email: cleanEmail,
+          username: cleanEmail,
           password: cleanPassword,
-          name: authForm.name.trim() || cleanUsername,
-          department: authForm.department.trim() || 'Genel Müdürlük',
+          name: cleanName,
+          department: authForm.department.trim() || 'Genel',
         }),
       });
       const data = await res.json();
@@ -592,10 +592,10 @@ for (let r = 1; r <= 5; r++) {
       const loggedUser = data.user;
       setCurrentUser({
         id: loggedUser.id,
-        username: loggedUser.username,
+        username: loggedUser.email || loggedUser.username,
         name: loggedUser.name,
-        email: loggedUser.email,
-        department: loggedUser.department,
+        email: loggedUser.email || loggedUser.username,
+        department: loggedUser.department || 'Genel',
         color: loggedUser.color,
         role: 'editor',
       });
@@ -607,7 +607,7 @@ for (let r = 1; r <= 5; r++) {
       setIsAuthenticated(true);
       setAuthLoading(false);
 
-      // Eğer URL'de paylaşılan bir oda kodu (?room=XLS-...) varsa doğrudan o odayı aç, yoksa son odayı yükle
+      // Eğer davet linki (?room=XLS-...) ile gelindiyse o odayı aç, aksi halde Oda Seçim Ekranını (Lobby) göster!
       const urlParams =
         typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
       const sharedRoomParam = urlParams?.get('room')?.trim().toUpperCase();
@@ -619,17 +619,16 @@ for (let r = 1; r <= 5; r++) {
           userRooms.find((r) => r.roomCode === sharedRoomParam)?.pin ||
           '';
         setRoomPin(savedPin);
+        setIsInRoomLobby(false);
         await loadRoomFromDatabase(sharedRoomParam, savedPin, false, 0);
-      } else if (userRooms.length > 0) {
-        const lastRoom = userRooms[0];
-        setRoomPin(lastRoom.pin || '');
-        await loadRoomFromDatabase(lastRoom.roomCode, lastRoom.pin || '', true, 0);
+      } else {
+        setIsInRoomLobby(true);
       }
 
       showToast(
         authMode === 'register'
           ? `🎉 Hesabınız oluşturuldu! Hoş geldiniz, ${loggedUser.name}`
-          : `👋 Tekrar hoş geldiniz, ${loggedUser.name} (${userRooms.length} kayıtlı Excel odanız yüklendi)`
+          : `👋 Hoş geldiniz, ${loggedUser.name}`
       );
     } catch (err) {
       setAuthError('Sunucu ile bağlantı kurulamadı.');
@@ -642,42 +641,49 @@ for (let r = 1; r <= 5; r++) {
       localStorage.removeItem(AUTH_STORAGE_KEY);
     }
     setIsAuthenticated(false);
-    setAuthForm({ username: currentUser.username, password: '', name: '', department: '' });
+    setIsInRoomLobby(true);
+    setRoomCode('');
+    setOpenWorkbooks([]);
+    setAuthForm({
+      email: currentUser.email || currentUser.username,
+      password: '',
+      name: '',
+      department: '',
+    });
     setAuthError(null);
   };
 
-  // Başlangıçta kullanıcı oturumunu, geçmiş odalarını/PIN'lerini ve KAYITLI TABLOYU yükle
+  // Başlangıçta kullanıcı oturumunu ve kayıtlı oda listesini yükle
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
     setRecentFormulas(getRecentFormulaNames());
 
-    let restoredUsername = '';
     let restoredUserRooms: UserSavedRoomItem[] = [];
 
     const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
     if (savedAuth) {
       try {
         const parsed = JSON.parse(savedAuth);
-        if (parsed && parsed.username) {
-          restoredUsername = parsed.username;
+        const emailKey = (parsed?.email || parsed?.username || '').trim().toLowerCase();
+        if (parsed && emailKey) {
           setCurrentUser({
-            id: parsed.id || `usr_${parsed.username}`,
-            username: parsed.username,
-            name: parsed.name || parsed.username,
-            email: parsed.email || `${parsed.username}@kurumsal.local`,
-            department: parsed.department || 'Genel Müdürlük',
+            id: parsed.id || `usr_${emailKey}`,
+            username: emailKey,
+            name: parsed.name || emailKey,
+            email: emailKey,
+            department: parsed.department || 'Genel',
             color: parsed.color || '#059669',
             role: parsed.role || 'editor',
           });
-          if (Array.isArray(parsed.savedRooms) && parsed.savedRooms.length > 0) {
+          if (Array.isArray(parsed.savedRooms)) {
             restoredUserRooms = parsed.savedRooms;
             setUserSavedRooms(parsed.savedRooms);
           }
           setIsAuthenticated(true);
 
-          // Sunucudan kullanıcının güncel oda & PIN geçmişini çek
-          fetch(`/api/auth?username=${encodeURIComponent(parsed.username)}`)
+          // Sunucudan kullanıcının güncel (silinmemiş) oda listesini çek
+          fetch(`/api/auth?email=${encodeURIComponent(emailKey)}`)
             .then((r) => r.json())
             .then((d) => {
               if (d?.user?.savedRooms) {
@@ -700,57 +706,22 @@ for (let r = 1; r <= 5; r++) {
       setIsRoomOwner(false);
     }
 
-    let localSavedAt = 0;
-    let targetRoom = roomParam
-      ? roomParam.toUpperCase()
-      : restoredUserRooms[0]?.roomCode || 'XLS-849-201';
-    let targetPin =
-      pinParam ||
-      restoredUserRooms.find((r) => r.roomCode === targetRoom)?.pin ||
-      '';
-
-    // 1) Önce tarayıcı hafızasındaki (localStorage) son kaydedilen çalışma kitaplarını ve tabloyu geri yükle
-    if (!roomParam) {
-      try {
-        const rawWorkspace = localStorage.getItem(WORKSPACE_STORAGE_KEY);
-        if (rawWorkspace) {
-          const parsedWs = JSON.parse(rawWorkspace);
-          if (parsedWs && parsedWs.workbookData && parsedWs.workbookData.sheets) {
-            localSavedAt = parsedWs.savedAt || Date.now();
-            if (parsedWs.roomCode) {
-              targetRoom = parsedWs.roomCode;
-              targetPin =
-                restoredUserRooms.find((r) => r.roomCode === targetRoom)?.pin || '';
-            }
-            if (Array.isArray(parsedWs.openWorkbooks) && parsedWs.openWorkbooks.length > 0) {
-              setOpenWorkbooks(parsedWs.openWorkbooks);
-            }
-            if (parsedWs.activeWorkbookTabId) {
-              setActiveWorkbookTabId(parsedWs.activeWorkbookTabId);
-            }
-            if (Array.isArray(parsedWs.snapshots) && parsedWs.snapshots.length > 0) {
-              setSnapshots(parsedWs.snapshots);
-            }
-            if (Array.isArray(parsedWs.auditLog) && parsedWs.auditLog.length > 0) {
-              setAuditLog(parsedWs.auditLog);
-            }
-            const clonedWb = JSON.parse(JSON.stringify(parsedWs.workbookData));
-            latestRestoredWorkbookRef.current = clonedWb;
-            setWorkbookData(clonedWb);
-            sheetHandleRef.current?.loadWorkbookSnapshot(clonedWb);
-          }
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
-
     isHydratedFromStorageRef.current = true;
-    setRoomCode(targetRoom);
-    if (targetPin) setRoomPin(targetPin);
 
-    // 2) Ardından sunucu veritabanındaki (.data/rooms.json) kayıtlı odayı kontrol et
-    loadRoomFromDatabase(targetRoom, targetPin, !roomParam, localSavedAt);
+    // Yalnızca doğrudan davet linki (?room=XLS-...) varsa odayı otomatik aç, yoksa Oda Seçim Ekranında (Lobby) bekle
+    if (roomParam) {
+      const targetRoom = roomParam.toUpperCase().trim();
+      const targetPin =
+        pinParam ||
+        restoredUserRooms.find((r) => r.roomCode === targetRoom)?.pin ||
+        '';
+      setRoomCode(targetRoom);
+      if (targetPin) setRoomPin(targetPin);
+      setIsInRoomLobby(false);
+      loadRoomFromDatabase(targetRoom, targetPin, false, 0);
+    } else {
+      setIsInRoomLobby(true);
+    }
   }, []);
 
   // Tablo, sekmeler veya versiyonlar değiştikçe tarayıcı hafızasını otomatik güncelle
@@ -919,6 +890,7 @@ for (let r = 1; r <= 5; r++) {
   };
 
   useEffect(() => {
+    if (!roomCode || isInRoomLobby) return;
     const client = new RealtimeRoomClient(roomCode, (msg) => {
       if (msg.type === 'PRESENCE_UPDATE') {
         if (msg.presence.userId === currentUser.id) return;
@@ -1033,7 +1005,7 @@ for (let r = 1; r <= 5; r++) {
       client.destroy();
       clearInterval(pollInterval);
     };
-  }, [roomCode, currentUser.id, followingUserId]);
+  }, [roomCode, isInRoomLobby, currentUser.id, followingUserId]);
 
   // Bot simülasyonu: Selin Yılmaz D2 hücresinde işlem yapıyor
   const botStartRef = useRef<number>(Date.now());
@@ -1244,6 +1216,7 @@ for (let r = 1; r <= 5; r++) {
 
           setImportProgress({ active: false, percent: 0, text: '' });
           setActiveModal(null);
+          setIsInRoomLobby(false);
           showToast(
             `✅ "${file.name}" (${importedRoomCode}) odası olarak kaydedildi ve paylaşıma hazır!`
           );
@@ -1383,6 +1356,7 @@ for (let r = 1; r <= 5; r++) {
 
     setClipboardText('');
     setActiveModal(null);
+    setIsInRoomLobby(false);
 
     await fetch('/api/rooms', {
       method: 'POST',
@@ -1452,7 +1426,7 @@ for (let r = 1; r <= 5; r++) {
   const handleExportToExcel = () => {
     setOpenMenu('none');
     const currentSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
-    exportUniverDataToExcelFile(currentSnap, currentSnap.name || 'SyncSheet_Tablo');
+    exportUniverDataToExcelFile(currentSnap, currentSnap.name || 'Ortak_Excel_Tablo');
     showToast('📥 Excel (.xlsx) dosyası bilgisayarınıza indirildi.');
   };
 
@@ -2281,6 +2255,7 @@ for (let r = 1; r <= 5; r++) {
         );
 
         setActiveModal(null);
+        setIsInRoomLobby(false);
         if (!silentIfNotFound) {
           showToast(
             `📂 "${cloned.name || data.room.title}" (${data.room.roomCode}) odasına geçiş yapıldı!`
@@ -2297,38 +2272,40 @@ for (let r = 1; r <= 5; r++) {
   // Kullanıcının geçmişte girdiği odalar/Exceller arasında tek tıkla geçiş yapması (Önce mevcut odayı kaydeder!)
   const handleSwitchToUserRoom = async (targetCode: string, savedPinForRoom = '') => {
     const cleanTarget = targetCode.trim().toUpperCase();
-    if (cleanTarget === roomCode) {
+    if (cleanTarget === roomCode && !isInRoomLobby) {
       setActiveModal(null);
       return;
     }
 
-    // Geçiş yapmadan önce üzerinde çalışılan mevcut odayı sessizce kaydet
-    try {
-      const currentSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
-      await fetch('/api/rooms', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          actionType: 'SAVE_WORKBOOK',
-          roomCode,
-          pin: roomPin || undefined,
-          defaultRole: defaultRoomRole,
-          protectedColumns,
-          title: currentSnap.name,
-          ownerId: currentUser.id,
-          ownerName: currentUser.name,
-          ownerEmail: currentUser.email,
-          workbookData: currentSnap,
-          silentSwitchSave: true,
-          stats: {
-            totalRows: stats.totalRows,
-            totalCells: stats.totalCells,
-            compressedKB: stats.compressedKB,
-          },
-        }),
-      });
-    } catch (e) {
-      // ignore
+    // Geçiş yapmadan önce üzerinde çalışılan aktif bir oda varsa sessizce kaydet
+    if (roomCode && !isInRoomLobby) {
+      try {
+        const currentSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+        await fetch('/api/rooms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actionType: 'SAVE_WORKBOOK',
+            roomCode,
+            pin: roomPin || undefined,
+            defaultRole: defaultRoomRole,
+            protectedColumns,
+            title: currentSnap.name,
+            ownerId: currentUser.id,
+            ownerName: currentUser.name,
+            ownerEmail: currentUser.email,
+            workbookData: currentSnap,
+            silentSwitchSave: true,
+            stats: {
+              totalRows: stats.totalRows,
+              totalCells: stats.totalCells,
+              compressedKB: stats.compressedKB,
+            },
+          }),
+        });
+      } catch (e) {
+        // ignore
+      }
     }
 
     await loadRoomFromDatabase(cleanTarget, savedPinForRoom, false, 0);
@@ -2340,40 +2317,35 @@ for (let r = 1; r <= 5; r++) {
     const randomPart2 = Math.floor(100 + Math.random() * 900);
     const generatedCode = `XLS-${randomPart1}-${randomPart2}`;
 
-    let baseWb: UniverWorkbookData;
-    if (newRoomForm.template === 'budget') {
-      baseWb = getDefaultEnterpriseWorkbook();
-    } else if (newRoomForm.template === 'crm') {
-      baseWb = getSalesCrmWorkbook();
-    } else {
-      baseWb = getBlankWorkbook(userSavedRooms.length + 1);
-    }
+    const baseWb: UniverWorkbookData = getBlankWorkbook(userSavedRooms.length + 1);
 
     const finalTitle =
       newRoomForm.title.trim().replace(/\s+/g, '_') ||
-      `Yeni_Excel_${userSavedRooms.length + 1}`;
+      `Ortak_Excel_${userSavedRooms.length + 1}`;
     const finalPin = newRoomForm.pin.trim();
 
     baseWb.id = `wb_${generatedCode}`;
     baseWb.name = finalTitle;
 
     try {
-      // Önce mevcut odayı sessizce kaydet
-      const currentSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
-      await fetch('/api/rooms', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          actionType: 'SAVE_WORKBOOK',
-          roomCode,
-          pin: roomPin || undefined,
-          title: currentSnap.name,
-          ownerId: currentUser.id,
-          ownerName: currentUser.name,
-          workbookData: currentSnap,
-          silentSwitchSave: true,
-        }),
-      });
+      // Önce mevcut açık bir oda varsa sessizce kaydet
+      if (roomCode && !isInRoomLobby) {
+        const currentSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+        await fetch('/api/rooms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            actionType: 'SAVE_WORKBOOK',
+            roomCode,
+            pin: roomPin || undefined,
+            title: currentSnap.name,
+            ownerId: currentUser.id,
+            ownerName: currentUser.name,
+            workbookData: currentSnap,
+            silentSwitchSave: true,
+          }),
+        });
+      }
 
       // Yeni odayı veritabanında oluştur
       const createRes = await fetch('/api/rooms', {
@@ -2417,7 +2389,7 @@ for (let r = 1; r <= 5; r++) {
             timestamp: nowTs,
             rowCount: 20,
           },
-          ...prev.filter((s) => (s.roomCode || 'XLS-849-201') !== generatedCode),
+          ...prev.filter((s) => s.roomCode !== generatedCode),
         ].sort((a, b) => b.timestamp - a.timestamp)
       );
       setAuditLog((prev) =>
@@ -2433,7 +2405,7 @@ for (let r = 1; r <= 5; r++) {
             timestamp: nowTs,
             snapshotId: initSnapId,
           },
-          ...prev.filter((a) => (a.roomCode || 'XLS-849-201') !== generatedCode),
+          ...prev.filter((a) => a.roomCode !== generatedCode),
         ].sort((a, b) => b.timestamp - a.timestamp)
       );
 
@@ -2459,6 +2431,7 @@ for (let r = 1; r <= 5; r++) {
       await recordRoomInUserHistory(generatedCode, finalTitle, finalPin, 'owner');
       setNewRoomForm({ title: '', pin: '', template: 'blank' });
       setActiveModal(null);
+      setIsInRoomLobby(false);
       showToast(
         `✨ Yeni Excel odanız "${finalTitle}" (${generatedCode}${finalPin ? ` • PIN: ${finalPin}` : ''}) oluşturuldu!`
       );
@@ -2475,6 +2448,174 @@ for (let r = 1; r <= 5; r++) {
     } catch (e) {
       // ignore
     }
+  };
+
+  // EXCEL COPILOT: Doğal dil komutundan canlı formül ve önizleme üretimi
+  const copilotSuggestions = useMemo(
+    () => getCopilotSmartSuggestions(workbookData, activeSelection.sheetId),
+    [workbookData, activeSelection.sheetId]
+  );
+
+  const copilotResult: CopilotResult = useMemo(() => {
+    const effectivePrompt =
+      copilotPrompt.trim() || copilotSuggestions[0]?.prompt || 'B sütunundaki değerleri topla';
+    return generateCopilotSolution(
+      effectivePrompt,
+      workbookData,
+      activeSelection.row,
+      activeSelection.col,
+      activeSelection.sheetId
+    );
+  }, [
+    copilotPrompt,
+    copilotSuggestions,
+    workbookData,
+    activeSelection.row,
+    activeSelection.col,
+    activeSelection.sheetId,
+  ]);
+
+  const handleApplyCopilotToCell = () => {
+    sheetHandleRef.current?.setFormulaOrValueOnCell(
+      activeSelection.sheetId,
+      activeSelection.row,
+      activeSelection.col,
+      copilotResult.formula,
+      copilotResult.computedPreview
+    );
+
+    const nowTs = Date.now();
+    const snapId = `snap_copilot_${nowTs}`;
+    const latestWb = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+    const clonedWb = JSON.parse(JSON.stringify(latestWb));
+    latestRestoredWorkbookRef.current = clonedWb;
+    setWorkbookData(clonedWb);
+    setLocalSnapshotsMap((prev) => ({ ...prev, [snapId]: clonedWb }));
+
+    setSnapshots((prev) =>
+      [
+        {
+          id: snapId,
+          roomCode,
+          label: `Copilot: ${activeSelection.cellRef} (${copilotResult.formula})`,
+          createdBy: currentUser.name,
+          createdByDepartment: currentUser.department,
+          createdAt: new Date(nowTs).toISOString(),
+          timestamp: nowTs,
+          rowCount: stats.totalRows,
+          isAutoChange: true,
+        },
+        ...prev,
+      ].sort((a, b) => b.timestamp - a.timestamp)
+    );
+
+    setAuditLog((prev) =>
+      [
+        {
+          id: `aud_copilot_${nowTs}`,
+          roomCode,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userDepartment: currentUser.department,
+          userColor: currentUser.color,
+          action: `Excel Copilot ile ${activeSelection.cellRef} hücresine formül uyguladı`,
+          cellRef: activeSelection.cellRef,
+          sheetName: activeSelection.sheetName,
+          newValue: `${copilotResult.formula} ➔ ${copilotResult.computedPreview}`,
+          timestamp: nowTs,
+          snapshotId: snapId,
+        },
+        ...prev,
+      ].sort((a, b) => b.timestamp - a.timestamp)
+    );
+
+    showToast(
+      `✨ Copilot: ${activeSelection.cellRef} hücresine ${copilotResult.formula} uygulandı!`
+    );
+  };
+
+  const handleApplyCopilotToColumn = () => {
+    if (!copilotResult.columnWrites || copilotResult.columnWrites.length === 0) {
+      handleApplyCopilotToCell();
+      return;
+    }
+
+    const currentSnap = sheetHandleRef.current?.getCurrentSnapshot() || workbookData;
+    const updatedWb: UniverWorkbookData = JSON.parse(JSON.stringify(currentSnap));
+    const targetSheet =
+      updatedWb.sheets?.[activeSelection.sheetId] ||
+      updatedWb.sheets?.[Object.keys(updatedWb.sheets || {})[0]];
+
+    if (!targetSheet) return;
+    targetSheet.cellData = targetSheet.cellData || {};
+
+    const targetCol = copilotResult.columnWrites[0].col;
+    const colLetter = colIndexToLetter(targetCol);
+    const headerTitle =
+      copilotCustomHeader.trim() ||
+      copilotResult.columnHeaderSuggestion ||
+      `Copilot_${colLetter}`;
+
+    targetSheet.cellData[0] = targetSheet.cellData[0] || {};
+    targetSheet.cellData[0][targetCol] = {
+      v: headerTitle,
+      t: 1,
+      s: { bg: { rgb: '#eef2ff' }, cl: { rgb: '#312e81' }, bl: 1 },
+    };
+
+    copilotResult.columnWrites.forEach((w) => {
+      targetSheet.cellData[w.row] = targetSheet.cellData[w.row] || {};
+      targetSheet.cellData[w.row][w.col] = {
+        v: w.computedValue,
+        t: typeof w.computedValue === 'number' ? 2 : 1,
+        f: w.formula,
+      };
+    });
+
+    latestRestoredWorkbookRef.current = updatedWb;
+    setWorkbookData(updatedWb);
+    sheetHandleRef.current?.loadWorkbookSnapshot(updatedWb);
+
+    const nowTs = Date.now();
+    const snapId = `snap_copilot_col_${nowTs}`;
+    setLocalSnapshotsMap((prev) => ({ ...prev, [snapId]: updatedWb }));
+    setSnapshots((prev) =>
+      [
+        {
+          id: snapId,
+          roomCode,
+          label: `Copilot Sütun Hesaplama: ${colLetter} (${headerTitle})`,
+          createdBy: currentUser.name,
+          createdByDepartment: currentUser.department,
+          createdAt: new Date(nowTs).toISOString(),
+          timestamp: nowTs,
+          rowCount: stats.totalRows,
+        },
+        ...prev,
+      ].sort((a, b) => b.timestamp - a.timestamp)
+    );
+    setAuditLog((prev) =>
+      [
+        {
+          id: `aud_copilot_col_${nowTs}`,
+          roomCode,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userDepartment: currentUser.department,
+          userColor: currentUser.color,
+          action: `Excel Copilot ile ${colLetter} (${headerTitle}) sütununa ${copilotResult.columnWrites?.length} satır formül uyguladı`,
+          cellRef: `${colLetter}2`,
+          newValue: copilotResult.formula,
+          timestamp: nowTs,
+          snapshotId: snapId,
+        },
+        ...prev,
+      ].sort((a, b) => b.timestamp - a.timestamp)
+    );
+
+    showToast(
+      `🚀 Copilot: ${colLetter} (${headerTitle}) sütununda ${copilotResult.columnWrites.length} satır otomatik hesaplandı!`
+    );
   };
 
   // Canlı Pivot ve Sütun Hesaplamalarını Memoize Et (Büyük Excel dosyalarında her saniye yeniden hesaplanıp ekranı dondurmasını önler)
@@ -2505,10 +2646,10 @@ for (let r = 1; r <= 5; r++) {
 
   // Versiyon ve İşlem listesini SADECE AKTİF BULUNULAN ODADAKİ EXCEL İÇİN filtrele ve en yeni en üstte sırala
   const sortedSnapshots = snapshots
-    .filter((s) => (s.roomCode || 'XLS-849-201') === roomCode)
+    .filter((s) => Boolean(roomCode && s.roomCode === roomCode))
     .sort((a, b) => b.timestamp - a.timestamp);
   const sortedAuditLog = auditLog
-    .filter((a) => (a.roomCode || 'XLS-849-201') === roomCode)
+    .filter((a) => Boolean(roomCode && a.roomCode === roomCode))
     .sort((a, b) => b.timestamp - a.timestamp);
 
   const collaboratorList = Object.values(collaborators);
@@ -2523,19 +2664,22 @@ for (let r = 1; r <= 5; r++) {
     lockTimeoutSec * 1000
   );
 
-  // EĞER KULLANICI GİRİŞ YAPMADIYSA GERÇEK KULLANICI ADI & ŞİFRE GİRİŞ / KAYIT EKRANINI GÖSTER
+  // 1) EĞER KULLANICI GİRİŞ YAPMADIYSA: "ORTAK EXCEL" E-POSTA & AD SOYAD GİRİŞ / KAYIT EKRANI
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen w-screen bg-slate-900 flex items-center justify-center p-4">
+        <Head>
+          <title>Ortak Excel</title>
+        </Head>
         <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-7 shadow-2xl">
           <div className="flex items-center gap-3 mb-5">
             <div className="w-11 h-11 rounded-xl bg-[#107c41] flex items-center justify-center shadow-sm">
               <FileSpreadsheet className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-slate-900">SyncSheet Kurumsal Excel</h1>
+              <h1 className="text-lg font-bold text-slate-900">Ortak Excel</h1>
               <p className="text-xs text-slate-500">
-                Kişisel Oda, PIN ve Çalışma Kitabı Yönetimli Kullanıcı Girişi
+                Gerçek Zamanlı Ortak Çalışma & Akıllı Excel Platformu
               </p>
             </div>
           </div>
@@ -2568,7 +2712,7 @@ for (let r = 1; r <= 5; r++) {
                   : 'text-slate-500 hover:text-slate-800'
               }`}
             >
-              Hesap Oluştur (Kayıt Ol)
+              Kayıt Ol (Yeni Hesap)
             </button>
           </div>
 
@@ -2579,16 +2723,32 @@ for (let r = 1; r <= 5; r++) {
           )}
 
           <form onSubmit={handleAuthSubmit} className="space-y-3.5">
+            {authMode === 'register' && (
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Ad Soyad <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={authForm.name}
+                  onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })}
+                  placeholder="Örn: Deniz Sara"
+                  className="w-full bg-white border border-slate-300 focus:border-emerald-600 focus:outline-none rounded-xl px-3.5 py-2.5 text-xs text-slate-900"
+                />
+              </div>
+            )}
+
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                Kullanıcı Adı <span className="text-rose-500">*</span>
+                E-Posta Adresi <span className="text-rose-500">*</span>
               </label>
               <input
-                type="text"
+                type="email"
                 required
-                value={authForm.username}
-                onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
-                placeholder="Örn: denizsara"
+                value={authForm.email}
+                onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                placeholder="Örn: ad.soyad@sirket.com"
                 className="w-full bg-white border border-slate-300 focus:border-emerald-600 focus:outline-none rounded-xl px-3.5 py-2.5 text-xs text-slate-900"
               />
             </div>
@@ -2608,31 +2768,17 @@ for (let r = 1; r <= 5; r++) {
             </div>
 
             {authMode === 'register' && (
-              <div className="grid grid-cols-2 gap-2.5 pt-1">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Ad Soyad
-                  </label>
-                  <input
-                    type="text"
-                    value={authForm.name}
-                    onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })}
-                    placeholder="Örn: Deniz Sara"
-                    className="w-full bg-white border border-slate-300 focus:border-emerald-600 focus:outline-none rounded-xl px-3 py-2 text-xs text-slate-900"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Departman / Birim
-                  </label>
-                  <input
-                    type="text"
-                    value={authForm.department}
-                    onChange={(e) => setAuthForm({ ...authForm, department: e.target.value })}
-                    placeholder="Örn: Finans / Yönetim"
-                    className="w-full bg-white border border-slate-300 focus:border-emerald-600 focus:outline-none rounded-xl px-3 py-2 text-xs text-slate-900"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Departman / Birim (İsteğe Bağlı)
+                </label>
+                <input
+                  type="text"
+                  value={authForm.department}
+                  onChange={(e) => setAuthForm({ ...authForm, department: e.target.value })}
+                  placeholder="Örn: Finans / Yönetim"
+                  className="w-full bg-white border border-slate-300 focus:border-emerald-600 focus:outline-none rounded-xl px-3.5 py-2.5 text-xs text-slate-900"
+                />
               </div>
             )}
 
@@ -2644,15 +2790,376 @@ for (let r = 1; r <= 5; r++) {
               {authLoading
                 ? 'İşlem Yapılıyor...'
                 : authMode === 'register'
-                ? 'Hesabımı Oluştur ve Excellerimi Aç'
-                : 'Giriş Yap ve Kayıtlı Excellerimi Getir'}
+                ? 'Hesabımı Oluştur ve Odalarıma Geç'
+                : 'Giriş Yap ve Odalarımı Göster'}
             </button>
           </form>
 
           <div className="mt-5 pt-4 border-t border-slate-100 text-[11px] text-slate-500 leading-relaxed">
-            🔒 Hesabınızla giriş yaptığınızda <strong>geçmişte girdiğiniz tüm Excel odaları, oda kodları ve PIN şifreleri</strong> hesabınızda otomatik saklanır; istediğiniz zaman tek tıkla odalarınız arasında geçiş yapabilirsiniz.
+            🔒 Her e-posta adresi ile yalnızca tek bir hesap oluşturulabilir. Ortak çalışma odalarında ve işlem geçmişinde <strong>Ad Soyad</strong> bilginiz görünür.
           </div>
         </div>
+      </div>
+    );
+  }
+
+  // 2) KULLANICI GİRİŞ YAPTIKTAN SONRA DOĞRUDAN EXCEL'E GİTMEZ: ODA SEÇİM & KARŞILAMA EKRANI (LOBBY)
+  if (isInRoomLobby) {
+    return (
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDraggingOver(true);
+        }}
+        onDragLeave={() => setIsDraggingOver(false)}
+        onDrop={handleDropExcelFile}
+        className="min-h-screen w-screen bg-slate-900 text-slate-800 flex flex-col"
+      >
+        <Head>
+          <title>Ortak Excel</title>
+        </Head>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xlsx,.xls,.csv"
+          onChange={handleLocalExcelFileSelect}
+          className="hidden"
+        />
+
+        {statusToast && (
+          <div className="fixed bottom-6 right-6 z-50 bg-emerald-700 text-white px-4 py-3 rounded-xl shadow-lg flex items-center gap-2.5 text-xs font-medium">
+            <Sparkles className="w-4 h-4 text-emerald-200 shrink-0" />
+            <span>{statusToast}</span>
+          </div>
+        )}
+
+        {/* Üst Karşılama Çubuğu */}
+        <header className="h-16 bg-slate-950/80 border-b border-slate-800 px-6 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-[#107c41] flex items-center justify-center shadow-sm">
+              <FileSpreadsheet className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h1 className="text-base font-bold text-white">Ortak Excel</h1>
+              <p className="text-xs text-slate-400">
+                Çalışma Odalarım & Yeni Excel Başlatma Ekranı
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 bg-slate-800/90 border border-slate-700 px-3 py-1.5 rounded-full">
+              <span
+                className="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold text-white"
+                style={{ backgroundColor: currentUser.color }}
+              >
+                {currentUser.name.slice(0, 2).toUpperCase()}
+              </span>
+              <div className="text-left">
+                <div className="text-xs font-bold text-white leading-none">
+                  {currentUser.name}
+                </div>
+                <div className="text-[10px] text-slate-400 leading-none mt-0.5">
+                  {currentUser.email}
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-950 hover:text-rose-300 text-slate-300 border border-slate-700 text-xs font-semibold transition cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Çıkış Yap</span>
+            </button>
+          </div>
+        </header>
+
+        {/* İlerleme Çubuğu (Excel Yüklenirken) */}
+        {importProgress.active && (
+          <div className="bg-emerald-600 text-white px-6 py-2.5 flex items-center justify-between text-xs font-semibold">
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              <span>{importProgress.text}</span>
+            </div>
+            <span className="font-mono">%{importProgress.percent}</span>
+          </div>
+        )}
+
+        {/* Ana Gövde: Kayıtlı Excel Odaları Seçimi + Yeni Oda Oluşturma */}
+        <div className="flex-1 max-w-6xl w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* SOL SÜTUN (7 Sütun): KAYITLI EXCEL ODALARIM */}
+          <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <FolderOpen className="w-5 h-5 text-emerald-600" />
+                  <span>Kayıtlı Excel Odalarım ({userSavedRooms.length})</span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Devam etmek istediğiniz Excel odasını seçin veya gereksiz odaları veritabanından kalıcı olarak silin.
+                </p>
+              </div>
+            </div>
+
+            {userSavedRooms.length === 0 ? (
+              <div className="py-12 px-6 rounded-2xl bg-slate-50 border-2 border-dashed border-slate-200 text-center space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto">
+                  <FileSpreadsheet className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-bold text-slate-800">
+                    Henüz Kayıtlı Bir Excel Odanız Bulunmuyor
+                  </h3>
+                  <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                    Sağ taraftaki panelden <strong>yeni bir Ortak Excel odası oluşturabilir</strong>, bilgisayarınızdan <strong>.xlsx / .csv dosyası yükleyebilir</strong> veya mevcut bir oda koduyla katılabilirsiniz.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-[62vh] overflow-y-auto pr-1">
+                {userSavedRooms.map((rm) => {
+                  const isPinShown = revealedPins[rm.roomCode] ?? true;
+                  return (
+                    <div
+                      key={rm.roomCode}
+                      className="p-4 rounded-2xl border border-slate-200 hover:border-emerald-400 bg-slate-50/60 hover:bg-white transition flex items-center justify-between gap-3 shadow-2xs"
+                    >
+                      <div className="min-w-0 space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <span className="text-sm font-bold text-slate-900 truncate">
+                            {rm.title}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 flex-wrap text-xs">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-slate-200 font-mono font-bold text-slate-800">
+                            Kod: <span className="text-emerald-700">{rm.roomCode}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(rm.roomCode);
+                                showToast(`📋 Oda kodu (${rm.roomCode}) kopyalandı!`);
+                              }}
+                              className="text-slate-400 hover:text-slate-700 ml-1 cursor-pointer"
+                              title="Oda kodunu kopyala"
+                            >
+                              <Copy className="w-3 h-3" />
+                            </button>
+                          </span>
+
+                          {rm.pin ? (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-amber-50 border border-amber-300 font-mono font-bold text-amber-900">
+                              <Lock className="w-3 h-3 text-amber-600" />
+                              <span>PIN: {isPinShown ? rm.pin : '••••'}</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setRevealedPins((prev) => ({
+                                    ...prev,
+                                    [rm.roomCode]: !isPinShown,
+                                  }))
+                                }
+                                className="text-[10px] underline text-amber-700 hover:text-amber-950 ml-0.5 cursor-pointer font-sans"
+                              >
+                                {isPinShown ? 'Gizle' : 'Göster'}
+                              </button>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 text-[11px]">
+                              <Unlock className="w-3 h-3" />
+                              Şifresiz Oda
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="text-[11px] text-slate-400">
+                          Son erişim:{' '}
+                          {rm.lastAccessedAt
+                            ? new Date(rm.lastAccessedAt).toLocaleString('tr-TR')
+                            : 'Yeni'}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => handleSwitchToUserRoom(rm.roomCode, rm.pin)}
+                          className="px-4 py-2.5 rounded-xl bg-[#107c41] hover:bg-[#0c5e31] text-white text-xs font-bold cursor-pointer transition shadow-xs"
+                        >
+                          Odayı Aç ve Devam Et →
+                        </button>
+                        <button
+                          onClick={() => handleRemoveRoomFromUserHistory(rm.roomCode)}
+                          className="p-2.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition cursor-pointer"
+                          title="Bu odayı veritabanından kalıcı olarak sil"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* SAĞ SÜTUN (5 Sütun): YENİ ODA OLUŞTUR / EXCEL YÜKLE / KOD İLE KATIL */}
+          <div className="lg:col-span-5 space-y-4">
+            {/* KART 1: YENİ ORTAK EXCEL ODASI OLUŞTUR */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xl space-y-3.5">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                  <Plus className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Yeni Ortak Excel Odası Oluştur
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Sıfırdan boş bir ortak çalışma tablosu başlatın
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2.5">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Excel Tablo / Oda Adı
+                  </label>
+                  <input
+                    type="text"
+                    value={newRoomForm.title}
+                    onChange={(e) => setNewRoomForm({ ...newRoomForm, title: e.target.value })}
+                    placeholder="Örn: 2026_Satis_Tablosu"
+                    className="w-full bg-slate-50 border border-slate-300 focus:bg-white focus:border-emerald-600 focus:outline-none rounded-xl px-3 py-2 text-xs text-slate-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Oda PIN Şifresi (İsteğe Bağlı)
+                  </label>
+                  <input
+                    type="text"
+                    value={newRoomForm.pin}
+                    onChange={(e) => setNewRoomForm({ ...newRoomForm, pin: e.target.value })}
+                    placeholder="Şifresiz bırakmak için boş bırakın"
+                    className="w-full bg-slate-50 border border-slate-300 focus:bg-white focus:border-emerald-600 focus:outline-none rounded-xl px-3 py-2 text-xs font-mono text-slate-900"
+                  />
+                </div>
+
+                <button
+                  onClick={handleCreateNewUserExcelRoom}
+                  className="w-full py-2.5 rounded-xl bg-[#107c41] hover:bg-[#0c5e31] text-white text-xs font-bold shadow-xs cursor-pointer transition"
+                >
+                  ➕ Yeni Excel Odası Oluştur ve Aç
+                </button>
+              </div>
+            </div>
+
+            {/* KART 2: BİLGİSAYARDAN EXCEL YÜKLE VEYA PANODAN YAPIŞTIR */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xl space-y-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Upload className="w-4 h-4 text-emerald-600" />
+                <span>Bilgisayardan Excel Aç veya Yapıştır</span>
+              </h3>
+              <p className="text-[11px] text-slate-500">
+                Bilgisayarınızdaki bir <code>.xlsx</code> / <code>.csv</code> dosyasını yükleyin veya kopyaladığınız hücreleri yapıştırarak yeni oda başlatın.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="py-2.5 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Excel Seç (.xlsx)</span>
+                </button>
+                <button
+                  onClick={() => setActiveModal('clipboard')}
+                  className="py-2.5 px-3 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                >
+                  <ClipboardPaste className="w-3.5 h-3.5" />
+                  <span>Panodan Yapıştır</span>
+                </button>
+              </div>
+            </div>
+
+            {/* KART 3: ODA KODU & PIN İLE KATIL */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xl space-y-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Lock className="w-4 h-4 text-indigo-600" />
+                <span>Paylaşılan Bir Odaya Kod ile Katıl</span>
+              </h3>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={joinCodeInput}
+                  onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
+                  placeholder="Kod (XLS-...)"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-mono text-slate-900"
+                />
+                <input
+                  type="text"
+                  value={joinPinInput}
+                  onChange={(e) => setJoinPinInput(e.target.value)}
+                  placeholder="PIN (Varsa)"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-mono text-slate-900"
+                />
+              </div>
+              <button
+                onClick={() => {
+                  if (!joinCodeInput.trim()) return;
+                  handleSwitchToUserRoom(joinCodeInput, joinPinInput);
+                }}
+                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer transition"
+              >
+                🔗 Odaya Katıl ve Aç
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Panodan Yapıştır Modalı (Lobby ekranında da çalışması için) */}
+        {activeModal === 'clipboard' && (
+          <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white border border-slate-200 rounded-2xl max-w-lg w-full p-6 shadow-2xl">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-base font-bold text-slate-900">
+                  Excel Hücrelerini Yapıştırarak Yeni Oda Oluştur
+                </h3>
+                <button
+                  onClick={() => setActiveModal(null)}
+                  className="text-slate-400 hover:text-slate-700 p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <textarea
+                value={clipboardText}
+                onChange={(e) => setClipboardText(e.target.value)}
+                placeholder="Excel'de hücreleri kopyalayıp (Ctrl+C) buraya yapıştırın (Ctrl+V)..."
+                rows={7}
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl p-3 text-xs font-mono text-slate-800 mb-4"
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setActiveModal(null)}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 cursor-pointer"
+                >
+                  İptal
+                </button>
+                <button
+                  onClick={handleClipboardImport}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold bg-[#107c41] text-white cursor-pointer"
+                >
+                  Odayı Oluştur ve Tabloyu Aç
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -2670,6 +3177,9 @@ for (let r = 1; r <= 5; r++) {
       }}
       className="flex flex-col w-screen h-screen bg-white text-slate-800 select-none overflow-hidden"
     >
+      <Head>
+        <title>Ortak Excel</title>
+      </Head>
       <input
         ref={fileInputRef}
         type="file"
@@ -2703,6 +3213,14 @@ for (let r = 1; r <= 5; r++) {
       <div className="h-10 bg-slate-900 text-slate-200 px-3 flex items-center justify-between gap-2 text-xs shrink-0 border-b border-slate-800">
         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
           <button
+            onClick={() => setIsInRoomLobby(true)}
+            className="text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-2.5 py-1 rounded-lg flex items-center gap-1.5 shrink-0 cursor-pointer transition"
+            title="Oda Seçim Ekranına (Kayıtlı Excel Odalarım) geri dön"
+          >
+            <span>← Odalarıma Dön</span>
+          </button>
+
+          <button
             onClick={() => {
               fetchSavedRooms();
               setActiveModal('my_rooms');
@@ -2711,7 +3229,7 @@ for (let r = 1; r <= 5; r++) {
             title="Geçmişte girdiğiniz tüm Excel odalarını, oda kodlarını ve PIN şifrelerini görüntüleyin"
           >
             <FolderOpen className="w-3.5 h-3.5" />
-            <span>Excellerim & PIN&apos;lerim ({userSavedRooms.length})</span>
+            <span>Kayıtlı Odalarım ({userSavedRooms.length})</span>
           </button>
 
           <span className="text-slate-700 mx-0.5">|</span>
@@ -2784,14 +3302,14 @@ for (let r = 1; r <= 5; r++) {
           </button>
         </div>
 
-        {/* Sağ Üst: Giriş Yapan Kullanıcı Hesabı & Oturumu Kapat */}
+        {/* Sağ Üst: Giriş Yapan Kullanıcı Hesabı (Ad Soyad Gösterimi) & Oturumu Kapat */}
         <div className="flex items-center gap-2 shrink-0">
-          <div className="hidden md:flex items-center gap-1.5 bg-slate-800 px-2.5 py-0.5 rounded-full border border-slate-700">
+          <div
+            className="hidden md:flex items-center gap-1.5 bg-slate-800 px-2.5 py-0.5 rounded-full border border-slate-700"
+            title={`E-Posta: ${currentUser.email}`}
+          >
             <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
             <span className="text-[11px] font-bold text-white">{currentUser.name}</span>
-            <span className="text-[10px] font-mono text-emerald-400">
-              (@{currentUser.username})
-            </span>
           </div>
           <button
             onClick={handleLogout}
@@ -2915,7 +3433,7 @@ for (let r = 1; r <= 5; r++) {
 
             <div
               className="flex items-center gap-1 pl-1 pr-2 py-0.5 rounded-full bg-white border border-slate-200 text-xs font-semibold text-slate-800"
-              title={`Aktif Kullanıcı: ${currentUser.name} (@${currentUser.username})`}
+              title={`Aktif Kullanıcı: ${currentUser.name} (${currentUser.email})`}
             >
               <span
                 className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
@@ -2923,7 +3441,9 @@ for (let r = 1; r <= 5; r++) {
               >
                 {currentUser.name.slice(0, 2).toUpperCase()}
               </span>
-              <span className="text-[11px] hidden sm:inline">Siz ({activeSelection.cellRef})</span>
+              <span className="text-[11px] hidden sm:inline">
+                {currentUser.name} ({activeSelection.cellRef})
+              </span>
             </div>
           </div>
 
@@ -2948,9 +3468,25 @@ for (let r = 1; r <= 5; r++) {
         </div>
       </header>
 
-      {/* 3. KATMAN: TÜRKÇE EXCEL ÖZELLİK ŞERİDİ (RIBBON BAR - FX, MASAÜSTÜ EXCEL KÖPRÜSÜ, PİVOT, KOŞULLU BİÇİMLENDİRME) */}
+      {/* 3. KATMAN: TÜRKÇE EXCEL ÖZELLİK ŞERİDİ (RIBBON BAR - EXCEL COPILOT, FX, MASAÜSTÜ EXCEL KÖPRÜSÜ, PİVOT, KOŞULLU BİÇİMLENDİRME) */}
       <div className="bg-slate-50 border-b border-slate-200 px-4 py-1.5 flex items-center justify-between gap-2 flex-wrap z-20 shrink-0">
         <div className="flex items-center gap-1.5 flex-wrap">
+          {/* ✨ EXCEL COPILOT (DOĞAL DİL FORMÜL ASİSTANI) BUTONU */}
+          <button
+            onClick={() =>
+              setActiveDrawer(activeDrawer === 'copilot' ? 'none' : 'copilot')
+            }
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold shadow-xs transition cursor-pointer ${
+              activeDrawer === 'copilot'
+                ? 'bg-purple-700 text-white ring-2 ring-purple-300'
+                : 'bg-linear-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white'
+            }`}
+            title="Formül yazmak yerine ne yapmak istediğinizi Türkçe söyleyin, Excel Copilot formülü otomatik oluştursun ve uygulasın"
+          >
+            <Sparkles className="w-4 h-4 text-amber-300" />
+            <span>Excel Copilot (Akıllı Formül Asistanı)</span>
+          </button>
+
           {/* FX FONKSİYON SİHİRBAZI BUTONU */}
           <button
             onClick={() => {
@@ -3433,6 +3969,185 @@ for (let r = 1; r <= 5; r++) {
             }}
           />
         </main>
+
+        {/* SAĞ YAN PANEL 0: ✨ EXCEL COPILOT (DOĞAL DİL FORMÜL & TABLO ASİSTANI) */}
+        {activeDrawer === 'copilot' && (
+          <aside className="w-[410px] bg-white border-l border-slate-200 flex flex-col h-full z-20 shrink-0 shadow-2xl">
+            <div className="p-4 border-b border-purple-100 flex items-center justify-between bg-linear-to-r from-purple-700 to-indigo-700 text-white">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-white/15 flex items-center justify-center">
+                  <Sparkles className="w-4 h-4 text-amber-300" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold flex items-center gap-1.5">
+                    <span>Ortak Excel Copilot</span>
+                    <span className="px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 text-[9px] font-extrabold uppercase">
+                      AI Asistan
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-purple-100">
+                    Formül bilmenize gerek yok; ne istediğinizi Türkçe yazın
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setActiveDrawer('none')}
+                className="text-purple-200 hover:text-white p-1 rounded-lg hover:bg-white/10 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4 overflow-y-auto flex-1 text-xs">
+              {/* Seçili Hücre ve Algılanan Sütunlar */}
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-700">Seçili Hedef Hücre:</span>
+                  <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-900 font-mono font-extrabold">
+                    {activeSelection.cellRef}
+                  </span>
+                </div>
+                {(() => {
+                  const { columns } = inspectActiveSheetColumns(
+                    workbookData,
+                    activeSelection.sheetId
+                  );
+                  if (columns.length === 0) return null;
+                  return (
+                    <div>
+                      <div className="text-[10px] font-semibold text-slate-400 uppercase mb-1">
+                        Tablodaki Sütunlarınız:
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {columns.map((c) => (
+                          <span
+                            key={c.colIndex}
+                            className="px-2 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-medium text-slate-700"
+                          >
+                            <strong className="font-mono text-purple-700">{c.colLetter}:</strong>{' '}
+                            {c.header}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Doğal Dil Giriş Kutusu */}
+              <div className="space-y-1.5">
+                <label className="block font-bold text-slate-800">
+                  Ne Hesaplamak İstiyorsunuz? (Türkçe Yazın)
+                </label>
+                <textarea
+                  value={copilotPrompt}
+                  onChange={(e) => setCopilotPrompt(e.target.value)}
+                  rows={3}
+                  placeholder="Örn: B sütunundaki değerlerin toplamını al&#10;Örn: B sütunu ile C sütununu çarp tüm satırlara uygula&#10;Örn: C2 10000'den büyükse Onaylı değilse Beklemede yaz"
+                  className="w-full bg-white border-2 border-purple-300 focus:border-purple-600 focus:outline-none rounded-xl p-3 text-xs text-slate-900 leading-relaxed"
+                />
+              </div>
+
+              {/* Tek Tıkla Akıllı Öneriler */}
+              <div>
+                <div className="text-[11px] font-bold text-slate-600 mb-1.5 flex items-center gap-1">
+                  <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                  <span>Tablonuza Özel Tek Tıkla Hazır Komutlar:</span>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {copilotSuggestions.map((sug, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setCopilotPrompt(sug.prompt)}
+                      className={`p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition cursor-pointer ${
+                        copilotPrompt === sug.prompt
+                          ? 'bg-purple-50 border-purple-400 text-purple-950 font-bold'
+                          : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-700'
+                      }`}
+                    >
+                      <span className="truncate">{sug.label}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[9px] font-extrabold shrink-0">
+                        {sug.badge}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Canlı Copilot Çözüm & Formül Önizleme Kartı */}
+              <div className="p-4 rounded-2xl bg-slate-900 text-white space-y-3 shadow-lg">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-purple-300">
+                    ✨ Copilot Tarafından Üretilen Çözüm
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold">
+                    Hedef: {activeSelection.cellRef}
+                  </span>
+                </div>
+
+                <div>
+                  <div className="text-xs font-bold text-white">{copilotResult.title}</div>
+                  <p className="text-[11px] text-slate-300 mt-0.5 leading-relaxed">
+                    {copilotResult.explanation}
+                  </p>
+                </div>
+
+                <div className="bg-slate-800 border border-slate-700 rounded-xl p-3 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10px] text-slate-400">Oluşturulan Excel Formülü</div>
+                    <div className="font-mono text-sm font-extrabold text-emerald-400 break-all mt-0.5">
+                      {copilotResult.formula}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-700">
+                    <div className="text-[10px] text-slate-400">Önizleme Sonucu</div>
+                    <div className="font-mono text-xs font-bold text-white">
+                      {typeof copilotResult.computedPreview === 'number'
+                        ? copilotResult.computedPreview.toLocaleString('tr-TR')
+                        : String(copilotResult.computedPreview)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-2 pt-1">
+                  <button
+                    onClick={handleApplyCopilotToCell}
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-sm cursor-pointer transition flex items-center justify-center gap-1.5"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>
+                      Seçili Hücreye ({activeSelection.cellRef}) Formülü Uygula
+                    </span>
+                  </button>
+
+                  {copilotResult.canApplyToColumn && copilotResult.columnWrites && (
+                    <div className="pt-2 border-t border-slate-800 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={copilotCustomHeader}
+                          onChange={(e) => setCopilotCustomHeader(e.target.value)}
+                          placeholder={`Yeni Sütun Başlığı (${copilotResult.columnHeaderSuggestion || 'Sonuç'})`}
+                          className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder:text-slate-400"
+                        />
+                      </div>
+                      <button
+                        onClick={handleApplyCopilotToColumn}
+                        className="w-full py-2.5 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-sm cursor-pointer transition flex items-center justify-center gap-1.5"
+                      >
+                        <Sparkles className="w-4 h-4 text-amber-300" />
+                        <span>
+                          Tüm Satırlara Yeni Sütun Olarak Uygula ({copilotResult.columnWrites.length} Satır)
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </aside>
+        )}
 
         {/* SAĞ YAN PANEL 1: KOŞULLU BİÇİMLENDİRME (EXCEL CONDITIONAL FORMATTING) */}
         {activeDrawer === 'conditional' && (
@@ -4718,9 +5433,9 @@ for (let r = 1; r <= 5; r++) {
                 </div>
                 <div>
                   <h3 className="text-base font-bold flex items-center gap-2">
-                    Excellerim, Geçmişte Girdiğim Odalar ve Kayıtlı PIN&apos;lerim
-                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-[10px] font-mono">
-                      @{currentUser.username}
+                    Kayıtlı Excel Odalarım ve PIN Şifrelerim
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-[10px]">
+                      {currentUser.name}
                     </span>
                   </h3>
                   <p className="text-xs text-slate-300">
@@ -4844,15 +5559,13 @@ for (let r = 1; r <= 5; r++) {
                             </span>
                           )}
 
-                          {userSavedRooms.length > 1 && (
-                            <button
-                              onClick={() => handleRemoveRoomFromUserHistory(rm.roomCode)}
-                              className="p-2 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
-                              title="Bu odayı geçmiş listemden kaldır"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
+                          <button
+                            onClick={() => handleRemoveRoomFromUserHistory(rm.roomCode)}
+                            className="p-2 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                            title="Bu odayı veritabanından kalıcı olarak sil"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
                       </div>
                     );
@@ -5076,7 +5789,7 @@ for (let r = 1; r <= 5; r++) {
                 </div>
                 <div>
                   <h3 className="text-base font-bold flex items-center gap-2">
-                    Canlı Masaüstü Excel ⇄ SyncSheet VLOOKUP / XLOOKUP Köprüsü
+                    Canlı Masaüstü Excel ⇄ Ortak Excel VLOOKUP / XLOOKUP Köprüsü
                     <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-[10px] font-semibold">
                       Çift Yönlü Canlı Senkronizasyon
                     </span>
