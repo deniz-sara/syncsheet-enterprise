@@ -2981,6 +2981,15 @@ for (let r = 1; r <= 5; r++) {
           <div className="mt-5 pt-4 border-t border-slate-100 text-[11px] text-slate-500 leading-relaxed">
             🔒 Her e-posta adresi ile yalnızca tek bir hesap oluşturulabilir. Ortak çalışma odalarında ve işlem geçmişinde <strong>Ad Soyad</strong> bilginiz görünür.
           </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-400 font-medium">
+            <span>Ortak Excel Platformu</span>
+            <span>© 2026 Deniz Şara</span>
+          </div>
+        </div>
+
+        <div className="fixed bottom-3 right-4 text-[11px] text-slate-500/80 font-medium select-none pointer-events-none">
+          Deniz Şara © 2026
         </div>
       </div>
     );
@@ -3304,6 +3313,12 @@ for (let r = 1; r <= 5; r++) {
           </div>
         </div>
 
+        {/* Alt İmza Çubuğu (Lobby) */}
+        <footer className="py-3 px-6 border-t border-slate-800/80 bg-slate-950/60 flex items-center justify-between text-[11px] text-slate-500">
+          <span>Ortak Excel • Gerçek Zamanlı Ortak Çalışma Platformu</span>
+          <span className="font-medium text-slate-400">© 2026 Deniz Şara</span>
+        </footer>
+
         {/* Panodan Yapıştır Modalı (Lobby ekranında da çalışması için) */}
         {activeModal === 'clipboard' && (
           <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -3487,6 +3502,9 @@ for (let r = 1; r <= 5; r++) {
 
         {/* Sağ Üst: Giriş Yapan Kullanıcı Hesabı (Ad Soyad Gösterimi) & Oturumu Kapat */}
         <div className="flex items-center gap-2 shrink-0">
+          <span className="hidden xl:inline text-[10px] text-slate-400 font-medium tracking-wide mr-1">
+            Deniz Şara © 2026
+          </span>
           <div
             className="hidden md:flex items-center gap-1.5 bg-slate-800 px-2.5 py-0.5 rounded-full border border-slate-700"
             title={`E-Posta: ${currentUser.email}`}
@@ -4264,6 +4282,18 @@ for (let r = 1; r <= 5; r++) {
               return true;
             }}
           />
+          <div className="h-5 bg-slate-900 text-slate-400 border-t border-slate-800 px-3 flex items-center justify-between text-[10px] shrink-0 select-none">
+            <div className="flex items-center gap-2 truncate">
+              <span className="text-emerald-400 font-semibold">Ortak Excel</span>
+              <span>•</span>
+              <span className="truncate">
+                Oda: <strong className="text-slate-200 font-mono">{roomCode}</strong> ({workbookData.name})
+              </span>
+            </div>
+            <div className="font-medium text-slate-300 tracking-wide shrink-0">
+              © 2026 Deniz Şara
+            </div>
+          </div>
         </main>
 
         {/* SAĞ YAN PANEL 0: ✨ EXCEL COPILOT (DOĞAL DİL FORMÜL & TABLO ASİSTANI) */}
