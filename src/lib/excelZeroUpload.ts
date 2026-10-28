@@ -31,8 +31,8 @@ export function parseExcelBufferToUniverData(
   const workbook = XLSX.read(buffer, {
     type: 'array',
     cellFormula: true,
-    cellStyles: true,
-    cellNF: true,
+    cellStyles: false,
+    cellNF: false,
     cellDates: true,
   });
 
@@ -42,9 +42,12 @@ export function parseExcelBufferToUniverData(
   const sheetOrder: string[] = [];
   let totalRows = 0;
   let totalCells = 0;
+  let totalFormulaCount = 0;
+  const MAX_TOTAL_CELLS_FOR_CLOUD = 90000;
 
   workbook.SheetNames.forEach((sheetName, idx) => {
     const ws = workbook.Sheets[sheetName];
+    if (!ws) return;
     const sheetId = `sheet_${idx + 1}`;
     sheetOrder.push(sheetId);
 
@@ -55,6 +58,8 @@ export function parseExcelBufferToUniverData(
     // Hücreleri hızlıca tarayalım (Boş biçimlendirilmiş hücreleri atlayarak JSON şişmesini önleyelim)
     const keys = Object.keys(ws);
     for (let i = 0; i < keys.length; i++) {
+      if (totalCells >= MAX_TOTAL_CELLS_FOR_CLOUD) break;
+
       const key = keys[i];
       if (key[0] === '!') continue;
 
@@ -62,16 +67,16 @@ export function parseExcelBufferToUniverData(
       if (!cell) continue;
 
       const hasFormula = Boolean(cell.f && String(cell.f).trim() !== '');
-      const hasValue =
-        cell.v !== undefined && cell.v !== null && String(cell.v).trim() !== '';
+      const rawVal = cell.v !== undefined && cell.v !== null ? cell.v : cell.w;
+      const hasValue = rawVal !== undefined && rawVal !== null && String(rawVal).trim() !== '';
       if (!hasValue && !hasFormula) continue;
 
       const decoded = XLSX.utils.decode_cell(key);
       const r = decoded.r;
       const c = decoded.c;
 
-      // Güvenlik sınırı: tek sayfada 50.000 satır / 200 sütun üstü boş/hatalı referansları engelle
-      if (r > 50000 || c > 200) continue;
+      // Güvenlik sınırı: tek sayfada 15.000 satır / 120 sütun üstü boş/hatalı referansları engelle
+      if (r > 15000 || c > 120) continue;
 
       if (r > actualMaxRow) actualMaxRow = r;
       if (c > actualMaxCol) actualMaxCol = c;
@@ -83,7 +88,7 @@ export function parseExcelBufferToUniverData(
       const univerCell: any = {};
 
       // Değer tipi: 1 = String, 2 = Number, 3 = Boolean
-      if (cell.t === 'n' && typeof cell.v === 'number' && !isNaN(cell.v)) {
+      if (cell.t === 'n' && typeof cell.v === 'number' && Number.isFinite(cell.v)) {
         univerCell.v = cell.v;
         univerCell.t = 2;
       } else if (cell.t === 'b') {
@@ -93,14 +98,27 @@ export function parseExcelBufferToUniverData(
         univerCell.v = cell.w || cell.v.toISOString().split('T')[0];
         univerCell.t = 1;
       } else if (hasValue) {
-        univerCell.v = String(cell.v);
+        univerCell.v = String(rawVal);
         univerCell.t = 1;
       }
 
-      // Formül varsa ekle
+      // Formül varsa ekle (Makro / Dış bağlantı / Çok yoğun formüllü dosyalarda tarayıcı donmasını önle)
       if (hasFormula) {
-        const fStr = String(cell.f).trim();
-        univerCell.f = fStr.startsWith('=') ? fStr : `=${fStr}`;
+        let fStr = String(cell.f).trim().replace(/_xlfn\./gi, '');
+        if (!fStr.startsWith('=')) fStr = `=${fStr}`;
+
+        const hasExternalOrMacroRef =
+          fStr.includes('[') ||
+          fStr.includes(':\\') ||
+          fStr.includes('.xl') ||
+          fStr.includes('!') && fStr.includes("'");
+
+        // Eğer hücrenin Excel tarafından hesaplanmış değeri zaten varsa ve formül dış/makro referansı içeriyorsa
+        // veya dosyada 600'den fazla formül varsa, hesaplanmış değeri koruyup Univer motorunun kilitlenmesini engelle
+        if (!hasExternalOrMacroRef && (totalFormulaCount < 600 || univerCell.v === undefined)) {
+          univerCell.f = fStr;
+          totalFormulaCount++;
+        }
       }
 
       // İlk satır (Header) ise varsayılan şık stil verelim
@@ -166,7 +184,7 @@ export function parseExcelBufferToUniverData(
 
   const workbookData: UniverWorkbookData = {
     id: `wb_${Date.now()}`,
-    name: fileName.replace(/\.(xlsx|xls|csv)$/i, ''),
+    name: fileName.replace(/\.(xlsx|xlsm|xlsb|xlsa|xlam|xla|xls|csv)$/i, ''),
     appVersion: '1.0.0',
     locale: 'enUS',
     styles: {

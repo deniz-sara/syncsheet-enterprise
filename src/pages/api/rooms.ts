@@ -493,7 +493,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         roomCode: cleanCode,
         version: nextVersion,
         updatedAt: updatedRoom.updatedAt,
-        room: updatedRoom,
       });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'Sunucu kayıt hatası' });

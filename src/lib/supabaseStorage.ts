@@ -230,34 +230,38 @@ export async function dbUpsertRoom(room: any): Promise<void> {
     .toUpperCase();
   if (!clean) return;
 
+  const cloudRoom = {
+    ...room,
+    recentCellDeltas: Array.isArray(room.recentCellDeltas)
+      ? room.recentCellDeltas.slice(-50)
+      : [],
+    auditLog: Array.isArray(room.auditLog) ? room.auditLog.slice(0, 50) : [],
+    snapshots: Array.isArray(room.snapshots)
+      ? room.snapshots.slice(0, 10).map((s: any) => {
+          const snapSize = s?.workbookData ? JSON.stringify(s.workbookData).length : 0;
+          // Büyük Excel / Makro dosyalarında (>250KB) snapshot içinde workbookData'yı ikinci kez kopyalayıp
+          // veritabanı paket boyutunu ikiye katlamayı önle (ana workbookData zaten room.workbookData içinde kayıtlıdır)
+          if (snapSize > 250000) {
+            const { workbookData, ...metaOnly } = s;
+            return metaOnly;
+          }
+          return s;
+        })
+      : [],
+  };
+
   // Yerel önbelleği güncelle
   const localMap = readLocalRoomsMap();
-  localMap[clean] = room;
+  localMap[clean] = cloudRoom;
   writeLocalRoomsMap(localMap);
 
   // Supabase'e kalıcı olarak yaz
   const cfg = getSupabaseConfig();
   if (cfg) {
     try {
-      const cloudRoom = {
-        ...room,
-        recentCellDeltas: Array.isArray(room.recentCellDeltas)
-          ? room.recentCellDeltas.slice(-50)
-          : [],
-        auditLog: Array.isArray(room.auditLog) ? room.auditLog.slice(0, 50) : [],
-        snapshots: Array.isArray(room.snapshots)
-          ? room.snapshots.slice(0, 12).map((s: any, idx: number) => {
-              const snapSize = s?.workbookData ? JSON.stringify(s.workbookData).length : 0;
-              if (snapSize > 1000000 && idx > 0) {
-                const { workbookData, ...metaOnly } = s;
-                return metaOnly;
-              }
-              return s;
-            })
-          : [],
-      };
-
       const endpoint = `${cfg.url}/rest/v1/syncsheet_rooms?on_conflict=room_code`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
       await fetch(endpoint, {
         method: 'POST',
         headers: buildHeaders(cfg.key, {
@@ -270,7 +274,8 @@ export async function dbUpsertRoom(room: any): Promise<void> {
             updated_at: new Date().toISOString(),
           },
         ]),
-      });
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeoutId));
     } catch (err) {
       console.error('Supabase dbUpsertRoom error:', err);
     }

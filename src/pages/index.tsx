@@ -1254,13 +1254,25 @@ for (let r = 1; r <= 5; r++) {
             ].sort((a, b) => b.timestamp - a.timestamp)
           );
 
-          setImportProgress({
-            active: true,
-            percent: 95,
-            text: `Oda (${importedRoomCode}) veritabanına kaydediliyor...`,
-          });
+          // 1) ÖNCE EKRANI ANINDA AÇ (%95'te veritabanı ağ isteğini bekleyip ekranı kilitleme!)
+          setImportProgress({ active: false, percent: 0, text: '' });
+          setActiveModal(null);
+          setIsInRoomLobby(false);
+          showToast(
+            `✅ "${file.name}" (${importedRoomCode}) açıldı ve arka planda veritabanına kaydediliyor...`
+          );
 
-          await fetch('/api/rooms', {
+          // 2) Kullanıcının geçmiş odalarına hemen ekle ve veritabanına arka planda (non-blocking) kaydet
+          recordRoomInUserHistory(
+            importedRoomCode,
+            result.workbookData.name,
+            '',
+            'owner'
+          ).catch(() => {});
+
+          const saveController = new AbortController();
+          const saveTimeout = setTimeout(() => saveController.abort(), 25000);
+          fetch('/api/rooms', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1279,21 +1291,18 @@ for (let r = 1; r <= 5; r++) {
                 compressedKB: compKB,
               },
             }),
-          }).catch(() => {});
-
-          await recordRoomInUserHistory(
-            importedRoomCode,
-            result.workbookData.name,
-            '',
-            'owner'
-          );
-
-          setImportProgress({ active: false, percent: 0, text: '' });
-          setActiveModal(null);
-          setIsInRoomLobby(false);
-          showToast(
-            `✅ "${file.name}" (${importedRoomCode}) odası olarak kaydedildi ve paylaşıma hazır!`
-          );
+            signal: saveController.signal,
+          })
+            .then((r) => {
+              if (r.ok) {
+                setStats((prev) => ({
+                  ...prev,
+                  lastSyncText: 'Veritabanına Kaydedildi',
+                }));
+              }
+            })
+            .catch(() => {})
+            .finally(() => clearTimeout(saveTimeout));
         } catch (innerErr: any) {
           setImportProgress({ active: false, percent: 0, text: '' });
           showToast(`Hata: ${innerErr?.message || 'Excel işlenemedi'}`);
@@ -1316,10 +1325,10 @@ for (let r = 1; r <= 5; r++) {
     e.preventDefault();
     setIsDraggingOver(false);
     const file = e.dataTransfer.files?.[0];
-    if (file && /\.(xlsx|xls|csv)$/i.test(file.name)) {
+    if (file && /\.(xlsx|xlsm|xlsb|xlsa|xlam|xla|xls|csv)$/i.test(file.name)) {
       await processExcelFile(file);
     } else if (file) {
-      showToast('Lütfen geçerli bir Excel (.xlsx, .xls, .csv) dosyası sürükleyin.');
+      showToast('Lütfen geçerli bir Excel (.xlsx, .xlsm, .xlsb, .xls, .csv) dosyası sürükleyin.');
     }
   };
 
@@ -2836,14 +2845,17 @@ for (let r = 1; r <= 5; r++) {
     );
   };
 
-  // Canlı Workbook ve Pivot Hesaplamalarını Memoize Et (Yeni eklenen sheetler ve canlı hücre verileri anında algılanır)
+  // Canlı Workbook ve Pivot Hesaplamalarını Memoize Et (Yalnızca Pivot çekmecesi/modalı açıkken ağır hesaplama çalıştırılır, dosya açılışını kilitlemez!)
   const liveWorkbookForPivot = useMemo(() => {
-    return (
-      sheetHandleRef.current?.getCurrentSnapshot() ||
-      latestRestoredWorkbookRef.current ||
-      workbookData
-    );
-  }, [workbookData, activeSelection.sheetId, activeSelection.cellRef, activeDrawer, activeModal, snapshots.length]);
+    if (activeDrawer === 'pivot' || activeModal === 'pivot_modal') {
+      return (
+        sheetHandleRef.current?.getCurrentSnapshot() ||
+        latestRestoredWorkbookRef.current ||
+        workbookData
+      );
+    }
+    return latestRestoredWorkbookRef.current || workbookData;
+  }, [workbookData, activeSelection.sheetId, activeDrawer, activeModal, snapshots.length]);
 
   const availableDataSheets = useMemo(() => {
     const sheetsMap = liveWorkbookForPivot?.sheets || {};
@@ -2867,15 +2879,40 @@ for (let r = 1; r <= 5; r++) {
       .filter((s: any) => s && isPivotSheetEntry(s.id, s));
   }, [liveWorkbookForPivot]);
 
-  const livePivotResult = useMemo(
-    () => computePivotTable(liveWorkbookForPivot, pivotConfig),
-    [liveWorkbookForPivot, pivotConfig]
-  );
+  const livePivotResult = useMemo(() => {
+    if (activeDrawer !== 'pivot' && activeModal !== 'pivot_modal') {
+      const fallbackSid =
+        pivotConfig.sourceSheetId ||
+        liveWorkbookForPivot?.sheetOrder?.[0] ||
+        Object.keys(liveWorkbookForPivot?.sheets || {})[0] ||
+        'sheet_1';
+      return {
+        sourceSheetId: fallbackSid,
+        sourceSheetName: liveWorkbookForPivot?.sheets?.[fallbackSid]?.name || 'Sayfa 1',
+        headers: [],
+        uniqueColKeys: [],
+        rows: [],
+        colTotals: {},
+        grandTotal: 0,
+        totalRecordCount: 0,
+        filterOptions: [],
+      };
+    }
+    return computePivotTable(liveWorkbookForPivot, pivotConfig);
+  }, [liveWorkbookForPivot, pivotConfig, activeDrawer, activeModal]);
 
-  const currentSheetColumns = useMemo(
-    () => getSheetColumnRanges(workbookData, activeSelection.sheetId),
-    [workbookData, activeSelection.sheetId]
-  );
+  const currentSheetColumns = useMemo(() => {
+    if (
+      isInRoomLobby ||
+      (activeModal !== 'fx' &&
+        activeModal !== 'excel_bridge' &&
+        activeDrawer !== 'copilot' &&
+        activeDrawer !== 'conditional')
+    ) {
+      return [];
+    }
+    return getSheetColumnRanges(workbookData, activeSelection.sheetId);
+  }, [workbookData, activeSelection.sheetId, isInRoomLobby, activeModal, activeDrawer]);
 
   const selectedFormulaDef =
     EXCEL_FORMULA_CATALOG.find((f) => f.name === selectedFormulaName) || EXCEL_FORMULA_CATALOG[0];
@@ -3079,7 +3116,7 @@ for (let r = 1; r <= 5; r++) {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".xlsx,.xls,.csv"
+          accept=".xlsx,.xlsm,.xlsb,.xlsa,.xlam,.xla,.xls,.csv"
           onChange={handleLocalExcelFileSelect}
           className="hidden"
         />
