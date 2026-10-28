@@ -364,6 +364,10 @@ for (let r = 1; r <= 5; r++) {
   );
 
   const sheetHandleRef = useRef<UniverSpreadsheetHandle | null>(null);
+  const mainWorkspaceRef = useRef<HTMLElement | null>(null);
+  const localCursorRef = useRef<{ xPct?: number; yPct?: number }>({});
+  const lastCursorBroadcastRef = useRef<number>(0);
+  const lastCursorServerSyncRef = useRef<number>(0);
   const roomClientRef = useRef<RealtimeRoomClient | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const bridgeFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -373,6 +377,54 @@ for (let r = 1; r <= 5; r++) {
   const lastActivitySentRef = useRef<number>(0);
   const isHydratedFromStorageRef = useRef<boolean>(false);
   const latestRestoredWorkbookRef = useRef<UniverWorkbookData | null>(null);
+
+  // Canlı fare imleci ve aktif hücre bilgisini sunucuya hafif paketle gönderip diğer kullanıcıların imleçlerini alma
+  const syncPresenceToServer = (presencePayload: CollaboratorPresence) => {
+    if (!roomCode || isInRoomLobby) return;
+    fetch('/api/rooms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        actionType: 'PRESENCE_SYNC',
+        roomCode,
+        presence: presencePayload,
+      }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.presenceMap) {
+          setCollaborators((prev) => {
+            const next: Record<string, CollaboratorPresence> = {};
+            // Mevcut aktif olanları koru (20 sn içinde güncellenenler)
+            Object.entries(prev).forEach(([uid, existingP]) => {
+              if (
+                uid !== currentUser.id &&
+                !String(uid).startsWith('bot_') &&
+                Date.now() - (existingP.lastUpdated || 0) < 20000
+              ) {
+                next[uid] = existingP;
+              }
+            });
+            // Sunucudan gelen yeni imleç ve hücre bilgilerini birleştir
+            Object.values(data.presenceMap).forEach((p: any) => {
+              if (
+                p &&
+                p.userId &&
+                p.userId !== currentUser.id &&
+                !String(p.userId).startsWith('bot_')
+              ) {
+                const currentKnown = next[p.userId];
+                if (!currentKnown || (p.lastUpdated || 0) >= (currentKnown.lastUpdated || 0)) {
+                  next[p.userId] = p;
+                }
+              }
+            });
+            return next;
+          });
+        }
+      })
+      .catch(() => {});
+  };
 
   const WORKSPACE_STORAGE_KEY = 'ortak_excel_workspace_v3';
 
@@ -991,15 +1043,28 @@ for (let r = 1; r <= 5; r++) {
         }
 
         if (data.presenceMap) {
-          setCollaborators(() => {
+          setCollaborators((prev) => {
             const next: Record<string, CollaboratorPresence> = {};
+            Object.entries(prev).forEach(([uid, existingP]) => {
+              if (
+                uid !== currentUser.id &&
+                !String(uid).startsWith('bot_') &&
+                Date.now() - (existingP.lastUpdated || 0) < 20000
+              ) {
+                next[uid] = existingP;
+              }
+            });
             Object.values(data.presenceMap).forEach((p: any) => {
               if (
+                p &&
                 p.userId &&
                 p.userId !== currentUser.id &&
                 !String(p.userId).startsWith('bot_')
               ) {
-                next[p.userId] = p;
+                const currentKnown = next[p.userId];
+                if (!currentKnown || (p.lastUpdated || 0) >= (currentKnown.lastUpdated || 0)) {
+                  next[p.userId] = p;
+                }
               }
             });
             return next;
@@ -1008,7 +1073,7 @@ for (let r = 1; r <= 5; r++) {
       } catch (e) {
         // ignore
       }
-    }, 3000);
+    }, 1500);
 
     return () => {
       client.destroy();
@@ -4020,7 +4085,120 @@ for (let r = 1; r <= 5; r++) {
 
       {/* ANA EXCEL ÇALIŞMA ALANI */}
       <div className="flex-1 flex w-full h-full overflow-hidden relative bg-white">
-        <main className="flex-1 flex flex-col h-full overflow-hidden relative">
+        <main
+          ref={mainWorkspaceRef}
+          onMouseMoveCapture={(e) => {
+            const el = mainWorkspaceRef.current;
+            if (!el) return;
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return;
+
+            const xPct = Math.max(
+              0,
+              Math.min(100, Number((((e.clientX - rect.left) / rect.width) * 100).toFixed(2)))
+            );
+            const yPct = Math.max(
+              0,
+              Math.min(100, Number((((e.clientY - rect.top) / rect.height) * 100).toFixed(2)))
+            );
+            localCursorRef.current = { xPct, yPct };
+
+            const now = Date.now();
+            const presencePayload: CollaboratorPresence = {
+              userId: currentUser.id,
+              userName: currentUser.name,
+              userColor: currentUser.color,
+              role: currentUser.role,
+              activeSheetId: activeSelection.sheetId,
+              activeSheetName: activeSelection.sheetName,
+              activeCellRef: activeSelection.cellRef,
+              row: activeSelection.row,
+              col: activeSelection.col,
+              lastUpdated: now,
+              lastActivityAt: lastActivitySentRef.current || now,
+              cursorXPct: xPct,
+              cursorYPct: yPct,
+              cursorUpdatedAt: now,
+            };
+
+            // Aynı tarayıcı sekmeleri arasında 40ms (25 FPS) akıcı imleç yayını
+            if (now - lastCursorBroadcastRef.current >= 40) {
+              lastCursorBroadcastRef.current = now;
+              roomClientRef.current?.sendPresence(presencePayload);
+            }
+
+            // Farklı bilgisayarlar / tarayıcılar arasında 450ms'de bir hafif imleç senkronizasyonu
+            if (now - lastCursorServerSyncRef.current >= 450) {
+              lastCursorServerSyncRef.current = now;
+              syncPresenceToServer(presencePayload);
+            }
+          }}
+          className="flex-1 flex flex-col h-full overflow-hidden relative"
+        >
+          {/* CANLI ORTAK ÇALIŞAN FARE İMLEÇLERİ (LIVE COLLABORATOR MOUSE CURSORS OVERLAY) */}
+          <div className="pointer-events-none absolute inset-0 z-30 overflow-hidden">
+            {collaboratorList
+              .filter(
+                (collab) =>
+                  collab.userId !== currentUser.id &&
+                  (!collab.activeSheetId ||
+                    !activeSelection.sheetId ||
+                    collab.activeSheetId === activeSelection.sheetId)
+              )
+              .map((collab) => {
+                // Eğer kullanıcının canlı fare koordinatı varsa onu kullan, yoksa seçili hücresine göre tahmini konum göster
+                const hasLiveMouse =
+                  typeof collab.cursorXPct === 'number' && typeof collab.cursorYPct === 'number';
+                const leftPct = hasLiveMouse
+                  ? collab.cursorXPct!
+                  : Math.min(90, Math.max(5, 7 + (collab.col || 0) * 8.5));
+                const topPct = hasLiveMouse
+                  ? collab.cursorYPct!
+                  : Math.min(86, Math.max(12, 16 + (collab.row || 0) * 4.2));
+
+                return (
+                  <div
+                    key={collab.userId}
+                    style={{
+                      left: `${leftPct}%`,
+                      top: `${topPct}%`,
+                    }}
+                    className="absolute -translate-x-0.5 -translate-y-0.5 transition-all duration-150 ease-out select-none"
+                  >
+                    {/* Figma / Google Sheets tarzı renkli fare imleci oku */}
+                    <svg
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className="drop-shadow-md"
+                    >
+                      <path
+                        d="M4 3L11.5 20L14.2 13.2L21 10.5L4 3Z"
+                        fill={collab.userColor || '#10b981'}
+                        stroke="#ffffff"
+                        strokeWidth="1.8"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+
+                    {/* İmlecin ucundaki kullanıcı adı + aktif hücre etiketi */}
+                    <div
+                      style={{ backgroundColor: collab.userColor || '#10b981' }}
+                      className="ml-3.5 -mt-1.5 px-2 py-0.5 rounded-full rounded-tl-xs text-white text-[10px] font-bold shadow-md flex items-center gap-1.5 whitespace-nowrap border border-white/80"
+                    >
+                      <span>{collab.userName}</span>
+                      {collab.activeCellRef && (
+                        <span className="px-1 py-0.2 rounded bg-black/25 font-mono text-[9px]">
+                          {collab.activeCellRef}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+
           <UniverSpreadsheet
             workbookData={workbookData}
             onReady={(handle) => {
@@ -4037,7 +4215,7 @@ for (let r = 1; r <= 5; r++) {
               const now = Date.now();
               if (now - lastActivitySentRef.current > 2000) {
                 lastActivitySentRef.current = now;
-                roomClientRef.current?.sendPresence({
+                const pres: CollaboratorPresence = {
                   userId: currentUser.id,
                   userName: currentUser.name,
                   userColor: currentUser.color,
@@ -4050,7 +4228,12 @@ for (let r = 1; r <= 5; r++) {
                   lastUpdated: now,
                   lastActivityAt: now,
                   isTyping: true,
-                });
+                  cursorXPct: localCursorRef.current.xPct,
+                  cursorYPct: localCursorRef.current.yPct,
+                  cursorUpdatedAt: now,
+                };
+                roomClientRef.current?.sendPresence(pres);
+                syncPresenceToServer(pres);
               }
             }}
             onSelectionChange={(sel) => {
@@ -4077,7 +4260,7 @@ for (let r = 1; r <= 5; r++) {
                 handleSelectExistingPivotSheet(sel.sheetId, false);
                 setActiveDrawer((prev) => (prev === 'none' ? 'pivot' : prev));
               }
-              roomClientRef.current?.sendPresence({
+              const selPres: CollaboratorPresence = {
                 userId: currentUser.id,
                 userName: currentUser.name,
                 userColor: currentUser.color,
@@ -4089,7 +4272,12 @@ for (let r = 1; r <= 5; r++) {
                 col: sel.col,
                 lastUpdated: now,
                 lastActivityAt: now,
-              });
+                cursorXPct: localCursorRef.current.xPct,
+                cursorYPct: localCursorRef.current.yPct,
+                cursorUpdatedAt: now,
+              };
+              roomClientRef.current?.sendPresence(selPres);
+              syncPresenceToServer(selPres);
             }}
             onCellEdited={(edit) => {
               const colLetter = colIndexToLetter(edit.col);

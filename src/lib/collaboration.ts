@@ -11,6 +11,9 @@ export interface CollaboratorPresence {
   lastUpdated: number;
   lastActivityAt: number; // Hücreyi seçtiği veya son tuşa bastığı an (Hareketsizlik kilidi için)
   isTyping?: boolean;
+  cursorXPct?: number; // Tablo alanı içindeki yatay fare konumu (%0 - %100)
+  cursorYPct?: number; // Tablo alanı içindeki dikey fare konumu (%0 - %100)
+  cursorUpdatedAt?: number;
 }
 
 /**

@@ -66,6 +66,9 @@ export interface RoomRecord {
   snapshots: RoomSnapshot[];
 }
 
+// Sunucu belleğinde canlı fare imleci (cursor) ve aktif hücre koordinatları için ultra-hızlı önbellek
+const livePresenceMemory: Record<string, Record<string, any>> = {};
+
 export const config = {
   api: {
     bodyParser: {
@@ -94,9 +97,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         updatedAt: r.updatedAt,
         version: r.version || 1,
         stats: r.stats,
-        activeUsersCount: Object.values(r.presenceMap || {}).filter(
-          (p: any) => Date.now() - (p.lastUpdated || 0) < 20000
-        ).length,
+        activeUsersCount: Object.values({
+          ...(r.presenceMap || {}),
+          ...(livePresenceMemory[r.roomCode] || {}),
+        }).filter((p: any) => Date.now() - (p.lastUpdated || 0) < 20000).length,
       }));
       return res.status(200).json({
         rooms: list,
@@ -115,9 +119,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .json({ error: 'Oda PIN şifresi hatalı veya eksik.', requiresPin: true });
     }
 
-    // 20 saniyeden eski presence kayıtlarını temizle
+    // 20 saniyeden eski presence kayıtlarını temizle ve canlı fare imleci önbelleği ile birleştir
     const activePresence: Record<string, any> = {};
-    Object.entries(room.presenceMap || {}).forEach(([uid, p]: [string, any]) => {
+    const mergedPresenceSource = {
+      ...(room.presenceMap || {}),
+      ...(livePresenceMemory[code] || {}),
+    };
+    Object.entries(mergedPresenceSource).forEach(([uid, p]: [string, any]) => {
       if (Date.now() - (p.lastUpdated || 0) < 20000) {
         activePresence[uid] = p;
       }
@@ -165,10 +173,33 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
 
       if (actionType === 'DELETE_ROOM') {
+        delete livePresenceMemory[cleanCode];
         await dbDeleteRoom(cleanCode);
         return res.status(200).json({
           success: true,
           deletedRoomCode: cleanCode,
+        });
+      }
+
+      // 0) Canlı Fare İmleci (Mouse Cursor) & Aktif Hücre Hızlı Senkronizasyonu (PRESENCE_SYNC)
+      if (actionType === 'PRESENCE_SYNC') {
+        if (body.presence && body.presence.userId) {
+          livePresenceMemory[cleanCode] = livePresenceMemory[cleanCode] || {};
+          livePresenceMemory[cleanCode][body.presence.userId] = {
+            ...(livePresenceMemory[cleanCode][body.presence.userId] || {}),
+            ...body.presence,
+            lastUpdated: Date.now(),
+          };
+        }
+        const activeMap: Record<string, any> = {};
+        Object.entries(livePresenceMemory[cleanCode] || {}).forEach(([uid, p]: [string, any]) => {
+          if (Date.now() - (p.lastUpdated || 0) < 20000) {
+            activeMap[uid] = p;
+          }
+        });
+        return res.status(200).json({
+          success: true,
+          presenceMap: activeMap,
         });
       }
 
@@ -198,10 +229,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
         if (body.presence && body.presence.userId) {
           existing.presenceMap = existing.presenceMap || {};
-          existing.presenceMap[body.presence.userId] = {
+          const mergedUserPres = {
+            ...(livePresenceMemory[cleanCode]?.[body.presence.userId] || {}),
+            ...(existing.presenceMap[body.presence.userId] || {}),
             ...body.presence,
             lastUpdated: Date.now(),
           };
+          existing.presenceMap[body.presence.userId] = mergedUserPres;
+          livePresenceMemory[cleanCode] = livePresenceMemory[cleanCode] || {};
+          livePresenceMemory[cleanCode][body.presence.userId] = mergedUserPres;
         }
 
         if (body.cellDelta) {
